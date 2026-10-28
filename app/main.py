@@ -50,12 +50,16 @@ class CreateIn(BaseModel):
     device_id: str
 
 
-@app.post("/checkout/create")
-def checkout_create(body: CreateIn, request: Request):
-    if not paypal.enabled():
-        raise HTTPException(503, "PayPal sandbox credentials not configured")
-    o = paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
-                            f"{settings.base_url}/")
+@app.post("/api/cases/{cid}/investigate")
+def investigate(cid: int, s=Depends(db)):
+    c = _case(s, cid)
+    if c.status in ("actioned", "dismissed"):
+        raise HTTPException(409, "case already closed; its case file is locked")
+    cf, model = investigator.investigate(s, json.loads(c.entry_json))
+    c.casefile_json = json.dumps({**cf.model_dump(), "analyst": model})
+    c.status = "investigated"
+    s.commit()
+    return c.as_dict()
     return o
 
 

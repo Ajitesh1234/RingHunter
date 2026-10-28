@@ -24,3 +24,11 @@ def test_investigate_approve_is_idempotent_and_blocks():
         a = c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0}).json()
         b = c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0}).json()
         assert b["idempotent_replay"] is True and a["accounts"]
+
+def test_closed_case_cannot_be_reinvestigated():
+    with TestClient(app) as c:
+        c.post("/api/demo/seed")
+        cid = c.get("/api/cases").json()[0]["id"]
+        c.post(f"/api/cases/{cid}/investigate")
+        c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
+        assert c.post(f"/api/cases/{cid}/investigate").status_code == 409

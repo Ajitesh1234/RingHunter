@@ -37,16 +37,25 @@ def _offline(entry, exp) -> CaseFile:
     """Deterministic analyst used when no API key is set (so judges can run the demo offline)."""
     attrs = ", ".join(entry.get("shared_attribute_types", [])) or "none"
     n, score = entry["cluster_size"], entry["suspicion_score"]
-    conf = "high" if score >= 0.8 else "medium"
-    act = "hold_accounts" if entry["decision"] == "AUTO_ACTION" else "request_more_info"
+    members = entry["cluster_members"]
+    strong = "AUTO_ACTION" in entry["decision"]
+    recs = ([Recommendation(action="hold_accounts", account_ids=members,
+                            reason="Block these accounts from future orders while the ring is reviewed."),
+             Recommendation(action="refund_transactions", account_ids=members,
+                            reason=f"Refund the {exp['transactions']} linked payments (${exp['total_amount']}) to remove exposure.")]
+            if strong else
+            [Recommendation(action="request_more_info", account_ids=members,
+                            reason="Evidence is moderate; gather more before acting.")])
     return CaseFile(
         summary=f"{n} accounts are linked through shared {attrs} with suspicion {score}. Exposure ${exp['total_amount']}.",
-        confidence=conf,
-        key_evidence=[entry.get("explanation", "")[:300]] + [
-            f"{e['pair'][0]} <-> {e['pair'][1]}: shares {', '.join(e['shared_attributes'])}" for e in entry.get("edges", [])[:5]],
-        caveats=["Heuristic graph scoring, not proof of fraud.", "A patient adversary who staggers behaviour can evade it."],
-        recommendations=[Recommendation(action=act, account_ids=entry["cluster_members"],
-                                        reason="Based on graph evidence; merchant approval required.")])
+        confidence="high" if score >= 0.8 else "medium",
+        key_evidence=[f"{e['pair'][0]} <-> {e['pair'][1]}: shares {', '.join(e['shared_attributes'])}"
+                      for e in entry.get("edges", [])[:5]]
+                     + [f"Transaction timing sync {entry.get('time_synchronization_score')}, "
+                        f"signup-batch sync {entry.get('account_creation_sync_score')}"],
+        caveats=["Heuristic graph scoring, not proof of fraud.",
+                 "A patient adversary who staggers behaviour can evade it."],
+        recommendations=recs)
 
 
 TOOLS = [
