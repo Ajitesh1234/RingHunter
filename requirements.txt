@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+networkx
+sqlalchemy>=2
+httpx
+pydantic>=2
+python-dotenv
+anthropic
+pytest
