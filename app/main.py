@@ -1,7 +1,6 @@
 import json
-import uuid
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from . import paypal, engine as eng, investigator
@@ -29,7 +28,7 @@ def health():
     return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": "claude" if settings.anthropic_key else "offline"}
 
 
-# ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
+# ---------- storefront (captures the signals PayPal does not expose) ----------
 STORE = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Demo Store</title>
 <body style="font-family:system-ui;max-width:420px;margin:40px auto"><h2>Demo Store (PayPal sandbox)</h2>
 <p>Sandbox Widget — $25.00</p><button id=b style="padding:12px 20px;font-size:16px">Pay with PayPal</button>
@@ -50,17 +49,12 @@ class CreateIn(BaseModel):
     device_id: str
 
 
-@app.post("/api/cases/{cid}/investigate")
-def investigate(cid: int, s=Depends(db)):
-    c = _case(s, cid)
-    if c.status in ("actioned", "dismissed"):
-        raise HTTPException(409, "case already closed; its case file is locked")
-    cf, model = investigator.investigate(s, json.loads(c.entry_json))
-    c.casefile_json = json.dumps({**cf.model_dump(), "analyst": model})
-    c.status = "investigated"
-    s.commit()
-    return c.as_dict()
-    return o
+@app.post("/checkout/create")
+def checkout_create(body: CreateIn, request: Request):
+    if not paypal.enabled():
+        raise HTTPException(503, "PayPal sandbox credentials not configured")
+    return paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
+                               f"{settings.base_url}/")
 
 
 @app.get("/checkout/return", response_class=HTMLResponse)
@@ -73,12 +67,11 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     addr = pu.get("shipping", {}).get("address", {})
     shipping = "|".join(str(addr.get(k, "")).lower().strip() for k in ("address_line_1", "postal_code", "country_code")) or None
     if s.get(Blocked, pid):
-        # NOTE: capture already happened above; auto-refund keeps the merchant whole.
         paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")
         return "<h3>Order declined.</h3>"
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip,
-                    shipping_address=shipping, created_at=now().isoformat(timespec="seconds")))
+                    shipping_address=shipping, created_at=now().replace(tzinfo=None).isoformat(timespec="seconds")))
     s.merge(Txn(id=c["id"], account_id=pid, ts=now().replace(tzinfo=None).isoformat(timespec="seconds"),
                 amount=float(c["amount"]["value"]), capture_id=c["id"]))
     s.commit()
@@ -102,8 +95,7 @@ async def webhook(request: Request, s=Depends(db)):
 def demo_seed(s=Depends(db)):
     from .seed import seed
     seed(s)
-    cases = eng.detect(s)
-    return {"flagged_cases": [c.id for c in cases]}
+    return {"flagged_cases": [c.id for c in eng.detect(s)]}
 
 
 @app.post("/api/detect")
@@ -126,6 +118,8 @@ def _case(s, cid) -> Case:
 @app.post("/api/cases/{cid}/investigate")
 def investigate(cid: int, s=Depends(db)):
     c = _case(s, cid)
+    if c.status in ("actioned", "dismissed"):
+        raise HTTPException(409, "case already closed; its case file is locked")
     cf, model = investigator.investigate(s, json.loads(c.entry_json))
     c.casefile_json = json.dumps({**cf.model_dump(), "analyst": model})
     c.status = "investigated"
