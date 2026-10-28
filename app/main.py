@@ -33,7 +33,7 @@ STORE = """<!doctype html><meta name=viewport content="width=device-width,initia
 <body style="font-family:system-ui;max-width:420px;margin:40px auto"><h2>Demo Store (PayPal sandbox)</h2>
 <p>Sandbox Widget — $25.00</p><button id=b style="padding:12px 20px;font-size:16px">Pay with PayPal</button>
 <p id=m></p><script>
-let d=localStorage.dev||(localStorage.dev='dev_'+crypto.randomUUID().slice(0,12));
+let d=new URLSearchParams(location.search).get('device')||localStorage.dev||(localStorage.dev='dev_'+crypto.randomUUID().slice(0,12));
 b.onclick=async()=>{const r=await fetch('/checkout/create',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({amount:'25.00',device_id:d})});const j=await r.json();
 if(j.approve_url)location=j.approve_url;else m.textContent=JSON.stringify(j)}</script>"""
@@ -71,7 +71,7 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
         return "<h3>Order declined.</h3>"
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip,
-                    shipping_address=shipping, created_at=now().replace(tzinfo=None).isoformat(timespec="seconds")))
+                    shipping_address=shipping))
     s.merge(Txn(id=c["id"], account_id=pid, ts=now().replace(tzinfo=None).isoformat(timespec="seconds"),
                 amount=float(c["amount"]["value"]), capture_id=c["id"]))
     s.commit()
@@ -105,7 +105,7 @@ def detect(s=Depends(db)):
 
 @app.get("/api/cases")
 def cases(s=Depends(db)):
-    return [c.as_dict() for c in s.scalars(select(Case).order_by(Case.score.desc()))]
+    return [c.as_dict() for c in s.scalars(select(Case).where(Case.status != "superseded").order_by(Case.score.desc()))]
 
 
 def _case(s, cid) -> Case:

@@ -32,3 +32,17 @@ def test_closed_case_cannot_be_reinvestigated():
         c.post(f"/api/cases/{cid}/investigate")
         c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
         assert c.post(f"/api/cases/{cid}/investigate").status_code == 409
+
+def test_growing_ring_supersedes_smaller_case():
+    from app.db import SessionLocal, Account, Txn, init_db
+    from app import engine as eng
+    init_db()
+    s = SessionLocal()
+    def add(n, minute):
+        s.merge(Account(id=n, device_id="devX", ip="1.1.1.1", shipping_address="same|1|us"))
+        s.merge(Txn(id=f"t{n}", account_id=n, ts=f"2026-10-28T10:0{minute}:00", amount=25.0))
+        s.commit()
+        eng.detect(s)
+    add("G1", 0); add("G2", 1); add("G3", 2)
+    open_cases = [c for c in eng.detect(s) if c.status == "open" and "G1" in c.entry_json]
+    assert len(open_cases) == 1 and open_cases[0].as_dict()["cluster"]["cluster_size"] == 3

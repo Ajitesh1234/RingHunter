@@ -33,11 +33,12 @@ def detect(s) -> list[Case]:
     if not accounts:
         return []
     trail, _ = core.run_detection(accounts, txns)
-    out = []
+    out, current = [], {}
     for entry in trail:
         if entry["decision"] == "NOT_FLAGGED" or entry["cluster_size"] < 2:
             continue
         key = case_key(entry["cluster_members"])
+        current[key] = set(entry["cluster_members"])
         case = s.scalar(select(Case).where(Case.key == key))
         if case:  # re-run: refresh evidence, keep status and casefile
             case.score, case.decision, case.entry_json = entry["suspicion_score"], entry["decision"], json.dumps(entry)
@@ -45,6 +46,11 @@ def detect(s) -> list[Case]:
             case = Case(key=key, score=entry["suspicion_score"], decision=entry["decision"], entry_json=json.dumps(entry))
             s.add(case)
         out.append(case)
+    # A ring that grows must not leave its smaller earlier version open as a duplicate case.
+    for old in s.scalars(select(Case).where(Case.status.in_(("open", "investigated")))):
+        om = set(json.loads(old.entry_json)["cluster_members"])
+        if old.key not in current and any(om < nm for nm in current.values()):
+            old.status = "superseded"
     s.commit()
     return out
 
