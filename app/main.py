@@ -1,6 +1,7 @@
 import json
+import uuid
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from . import paypal, engine as eng, investigator
@@ -28,7 +29,7 @@ def health():
     return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": "claude" if settings.anthropic_key else "offline"}
 
 
-# ---------- storefront (captures the signals PayPal does not expose) ----------
+# ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
 STORE = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Demo Store</title>
 <body style="font-family:system-ui;max-width:420px;margin:40px auto"><h2>Demo Store (PayPal sandbox)</h2>
 <p>Sandbox Widget — $25.00</p><button id=b style="padding:12px 20px;font-size:16px">Pay with PayPal</button>
@@ -53,12 +54,17 @@ class CreateIn(BaseModel):
 def checkout_create(body: CreateIn, request: Request):
     if not paypal.enabled():
         raise HTTPException(503, "PayPal sandbox credentials not configured")
-    return paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
-                               f"{settings.base_url}/")
+    o = paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
+                            f"{settings.base_url}/")
+    return o
 
 
 @app.get("/checkout/return", response_class=HTMLResponse)
 def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
+    order = paypal.get_order(token)
+    pre_pid = order.get("payer", {}).get("payer_id")
+    if pre_pid and s.get(Blocked, pre_pid):
+        return "<h3>Order declined.</h3>"  # never captured, so no money moves
     cap = paypal.capture_order(token)
     payer = cap.get("payer", {})
     pid = payer.get("payer_id")
@@ -67,11 +73,12 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     addr = pu.get("shipping", {}).get("address", {})
     shipping = "|".join(str(addr.get(k, "")).lower().strip() for k in ("address_line_1", "postal_code", "country_code")) or None
     if s.get(Blocked, pid):
+        # NOTE: capture already happened above; auto-refund keeps the merchant whole.
         paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")
         return "<h3>Order declined.</h3>"
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip,
-                    shipping_address=shipping))
+                    shipping_address=shipping))  # PayPal gives no signup time; first-seen time would be a fake signal
     s.merge(Txn(id=c["id"], account_id=pid, ts=now().replace(tzinfo=None).isoformat(timespec="seconds"),
                 amount=float(c["amount"]["value"]), capture_id=c["id"]))
     s.commit()
@@ -95,7 +102,8 @@ async def webhook(request: Request, s=Depends(db)):
 def demo_seed(s=Depends(db)):
     from .seed import seed
     seed(s)
-    return {"flagged_cases": [c.id for c in eng.detect(s)]}
+    cases = eng.detect(s)
+    return {"flagged_cases": [c.id for c in cases]}
 
 
 @app.post("/api/detect")

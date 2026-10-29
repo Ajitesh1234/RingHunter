@@ -48,6 +48,10 @@ def create_order(amount: str, currency: str, return_url: str, cancel_url: str) -
     return {"id": order["id"], "approve_url": link}
 
 
+def get_order(order_id: str) -> dict:
+    return _call("GET", f"/v2/checkout/orders/{order_id}")
+
+
 def capture_order(order_id: str) -> dict:
     return _call("POST", f"/v2/checkout/orders/{order_id}/capture", {}, request_id=f"cap-{order_id}")
 
