@@ -7,3 +7,4 @@ pydantic>=2
 python-dotenv
 anthropic
 pytest
+psycopg[binary]

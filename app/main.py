@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 import uuid
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -8,12 +9,13 @@ from . import paypal, engine as eng, investigator
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, now
 
-app = FastAPI(title="RingHunter", version="0.1.0")
-
-
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def lifespan(_app):
     init_db()
+    yield
+
+
+app = FastAPI(title="RingHunter", version="0.1.0", lifespan=lifespan)
 
 
 def db():

@@ -1,17 +1,27 @@
+databases:
+  - name: ringhunter-db
+    plan: free
+    databaseName: ringhunter
+    user: ringhunter
+
 services:
   - type: web
     name: ringhunter
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ringhunter-db
+          property: connectionString
       - key: BASE_URL
         sync: false
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_SECRET
-        sync: false
-      - key: PAYPAL_WEBHOOK_ID
-        sync: false
-      - key: ANTHROPIC_API_KEY
         sync: false

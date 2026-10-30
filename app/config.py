@@ -12,7 +12,9 @@ class Settings:
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./ringhunter.db")
+    database_url = (os.getenv("DATABASE_URL", "sqlite:///./ringhunter.db")
+                    .replace("postgres://", "postgresql+psycopg://", 1)
+                    .replace("postgresql://", "postgresql+psycopg://", 1))
 
 
 settings = Settings()
