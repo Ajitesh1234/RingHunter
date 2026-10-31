@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator, disputes as dsp
+from . import paypal, engine as eng, investigator, disputes as dsp, llm
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, now
 
@@ -28,7 +28,7 @@ def db():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": "claude" if settings.anthropic_key else "offline"}
+    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider()}
 
 
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------

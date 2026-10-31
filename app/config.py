@@ -9,6 +9,8 @@ class Settings:
     paypal_secret = os.getenv("PAYPAL_SECRET", "")
     paypal_webhook_id = os.getenv("PAYPAL_WEBHOOK_ID", "")
     paypal_base = "https://api-m.sandbox.paypal.com"  # sandbox only, by design
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     anthropic_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
     base_url = os.getenv("BASE_URL", "http://localhost:8000")
