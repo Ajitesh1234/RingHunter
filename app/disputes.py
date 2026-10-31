@@ -55,12 +55,13 @@ def _facts(s, d, carrier, tracking):
 
 
 def _template(f):
-    parts = [f"Order paid through PayPal (transaction {f['capture_id']}) for ${f['amount']}"
+    amt = f"${f['amount']:.2f}" if f["amount"] is not None else "the disputed amount"
+    parts = [f"Order paid through PayPal (transaction {f['capture_id']}) for {amt}"
              + (f" on {f['order_time']}." if f["order_time"] else ".")]
-    if f["shipping_address_on_file"]:
-        parts.append("The order was shipped to the address provided at checkout.")
-    if f["tracking_number"]:
-        parts.append(f"Tracking: {f['carrier'] or 'carrier'} {f['tracking_number']}.")
+    if f["tracking_number"]:  # only claim shipping when the merchant supplied real tracking
+        parts.append(f"Shipped to the address provided at checkout via {f['carrier'] or 'carrier'}, tracking {f['tracking_number']}.")
+    else:
+        parts.append("No tracking information is attached to this response.")
     parts.append("The seller asks that this dispute be reviewed with the transaction records above.")
     return " ".join(parts)
 

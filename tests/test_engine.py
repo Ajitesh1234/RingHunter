@@ -79,3 +79,9 @@ def test_dispute_links_to_account_and_drafts_evidence():
     assert "1Z999" in draft["notes"] and "CAPX" in draft["notes"]
     body = disputes.evidence_body(draft["notes"], "UPS", "1Z999")
     assert body["evidences"][0]["evidence_type"] == "PROOF_OF_FULFILLMENT"
+
+
+def test_evidence_template_never_claims_shipping_without_tracking():
+    from app.disputes import _template
+    f = {"capture_id": "C1", "amount": 25, "order_time": "2026-10-28T10:00:00", "carrier": None, "tracking_number": None}
+    assert "shipped" not in _template(f).lower() and "$25.00" in _template(f)
