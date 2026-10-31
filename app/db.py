@@ -78,5 +78,18 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class Dispute(Base):  # PayPal disputes received via webhook
+    __tablename__ = "disputes"
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal dispute id (PP-R-...)
+    capture_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_json: Mapped[str] = mapped_column(Text, default="{}")
+    evidence_submitted: Mapped[int] = mapped_column(Integer, default=0)
+
+
 def init_db():
     Base.metadata.create_all(engine)

@@ -64,6 +64,14 @@ def get_dispute(dispute_id: str) -> dict:
     return _call("GET", f"/v1/customer/disputes/{dispute_id}")
 
 
+def provide_evidence(dispute_id: str, body: dict) -> dict:
+    return _call("POST", f"/v1/customer/disputes/{dispute_id}/provide-evidence", body, request_id=f"ev-{dispute_id}")
+
+
+def send_message(dispute_id: str, message: str) -> dict:
+    return _call("POST", f"/v1/customer/disputes/{dispute_id}/send-message", {"message": message})
+
+
 def verify_webhook(headers: dict, event: dict) -> bool:
     if not (enabled() and settings.paypal_webhook_id):
         return False

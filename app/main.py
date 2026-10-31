@@ -5,9 +5,9 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator
+from . import paypal, engine as eng, investigator, disputes as dsp
 from .config import settings
-from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, now
+from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, now
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -95,6 +95,12 @@ async def webhook(request: Request, s=Depends(db)):
     if not paypal.verify_webhook(dict(request.headers), event):
         raise HTTPException(400, "signature verification failed")
     s.merge(Event(id=event["id"], type=event["event_type"], payload_json=json.dumps(event)))
+    if event["event_type"].startswith("CUSTOMER.DISPUTE"):
+        try:
+            dsp.upsert_from_resource(s, event.get("resource", {}))
+        except Exception:  # never fail a verified webhook because of parsing
+            s.rollback()
+            s.merge(Event(id=event["id"], type=event["event_type"], payload_json=json.dumps(event)))
     s.commit()
     return {"received": True}
 
@@ -176,3 +182,57 @@ def approve(cid: int, body: ApproveIn, s=Depends(db)):
     c.status = "actioned" if rec["action"] != "no_action" else "dismissed"
     s.commit()
     return result
+
+
+# ---------- disputes ----------
+@app.get("/api/disputes")
+def list_disputes(s=Depends(db)):
+    return [dsp.as_dict(s, d) for d in s.scalars(select(Dispute))]
+
+
+def _dispute(s, did) -> Dispute:
+    d = s.get(Dispute, did)
+    if not d:
+        raise HTTPException(404, "dispute not found")
+    return d
+
+
+@app.post("/api/disputes/{did}/refresh")
+def dispute_refresh(did: str, s=Depends(db)):
+    """Pull the latest dispute details from PayPal and re-link it to the buyer."""
+    d = dsp.upsert_from_resource(s, paypal.get_dispute(did))
+    if not d:
+        raise HTTPException(404, "PayPal returned no dispute")
+    s.commit()
+    return {**dsp.as_dict(s, d), "paypal": json.loads(d.raw_json)}
+
+
+@app.get("/api/disputes/{did}/draft")
+def dispute_draft(did: str, carrier: str | None = None, tracking_number: str | None = None, s=Depends(db)):
+    return dsp.draft_evidence(s, _dispute(s, did), carrier, tracking_number)
+
+
+class EvidenceIn(BaseModel):
+    carrier: str | None = None
+    tracking_number: str | None = None
+    notes: str | None = None  # if omitted, the drafted note is used
+    method: str = "evidence"  # "evidence" or "message"
+
+
+@app.post("/api/disputes/{did}/evidence")
+def dispute_evidence(did: str, body: EvidenceIn, s=Depends(db)):
+    """Sends evidence to PayPal. Only runs on explicit merchant approval; idempotent."""
+    d = _dispute(s, did)
+    if d.evidence_submitted:
+        return {"idempotent_replay": True}
+    notes = body.notes or dsp.draft_evidence(s, d, body.carrier, body.tracking_number)["notes"]
+    try:
+        if body.method == "message":
+            r = paypal.send_message(did, notes)
+        else:
+            r = paypal.provide_evidence(did, dsp.evidence_body(notes, body.carrier, body.tracking_number))
+    except paypal.PayPalError as e:
+        raise HTTPException(502, f"PayPal rejected the request: {e}")
+    d.evidence_submitted = 1
+    s.commit()
+    return {"submitted": True, "method": body.method, "notes": notes, "paypal": r}

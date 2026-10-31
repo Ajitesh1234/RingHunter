@@ -60,3 +60,22 @@ def test_closed_case_cannot_be_reinvestigated():
         c.post(f"/api/cases/{cid}/investigate")
         c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
         assert c.post(f"/api/cases/{cid}/investigate").status_code == 409
+
+
+def test_dispute_links_to_account_and_drafts_evidence():
+    from app.db import SessionLocal, Account, Txn, init_db
+    from app import disputes
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="D1", device_id="x", ip="1.1.1.1", shipping_address="a|1|us"))
+    s.merge(Txn(id="CAPX", account_id="D1", ts="2026-10-28T10:00:00", amount=25.0, capture_id="CAPX"))
+    s.commit()
+    d = disputes.upsert_from_resource(s, {"dispute_id": "PP-R-TEST-1", "reason": "MERCHANDISE_OR_SERVICE_NOT_RECEIVED",
+                                          "status": "OPEN", "dispute_amount": {"value": "25.00"},
+                                          "disputed_transactions": [{"seller_transaction_id": "CAPX"}]})
+    s.commit()
+    assert d.account_id == "D1" and d.amount == 25.0
+    draft = disputes.draft_evidence(s, d, carrier="UPS", tracking_number="1Z999")
+    assert "1Z999" in draft["notes"] and "CAPX" in draft["notes"]
+    body = disputes.evidence_body(draft["notes"], "UPS", "1Z999")
+    assert body["evidences"][0]["evidence_type"] == "PROOF_OF_FULFILLMENT"
