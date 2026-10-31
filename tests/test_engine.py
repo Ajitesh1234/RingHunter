@@ -163,3 +163,14 @@ def test_model_caveats_always_include_the_standard_disclaimers():
                   recommendations=[Recommendation(action="hold_accounts", account_ids=["A"], reason="r")])
     out = _enforce(cf, {"A"}, {"A"})
     assert "model caveat" in out.caveats and "Heuristic graph scoring, not proof of fraud." in out.caveats
+
+
+def test_admin_token_guards_state_changing_endpoints(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "admin_token", "s3cret", raising=False)
+    with TestClient(app) as c:
+        assert c.post("/api/detect").status_code == 401
+        assert c.post("/api/detect", headers={"X-Admin-Token": "wrong"}).status_code == 401
+        assert c.post("/api/detect", headers={"X-Admin-Token": "s3cret"}).status_code == 200
+        assert c.get("/api/cases").status_code == 200       # read-only stays public
+        assert c.get("/dashboard").status_code == 200

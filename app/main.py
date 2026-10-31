@@ -1,8 +1,11 @@
 import json
+import secrets
+from pathlib import Path
 from contextlib import asynccontextmanager
 import uuid
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, Security
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select
 from . import paypal, engine as eng, investigator, disputes as dsp, llm
@@ -26,9 +29,28 @@ def db():
         s.close()
 
 
+_admin_header = APIKeyHeader(name="X-Admin-Token", auto_error=False)
+
+
+def require_admin(token: str | None = Security(_admin_header)):
+    """Guards every endpoint that changes state or spends money. Empty ADMIN_TOKEN = open (local dev only)."""
+    if not settings.admin_token:
+        return
+    if not token or not secrets.compare_digest(token, settings.admin_token):
+        raise HTTPException(401, "admin token required")
+
+
+ADMIN = Depends(require_admin)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    return (Path(__file__).parent / "static" / "dashboard.html").read_text(encoding="utf-8")
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider()}
+    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider(), "admin_protected": bool(settings.admin_token)}
 
 
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
@@ -106,7 +128,7 @@ async def webhook(request: Request, s=Depends(db)):
 
 
 # ---------- cases ----------
-@app.post("/api/demo/seed")
+@app.post("/api/demo/seed", dependencies=[ADMIN])
 def demo_seed(s=Depends(db)):
     from .seed import seed
     seed(s)
@@ -114,7 +136,7 @@ def demo_seed(s=Depends(db)):
     return {"flagged_cases": [c.id for c in cases]}
 
 
-@app.post("/api/detect")
+@app.post("/api/detect", dependencies=[ADMIN])
 def detect(s=Depends(db)):
     return [c.as_dict() for c in eng.detect(s)]
 
@@ -131,7 +153,7 @@ def _case(s, cid) -> Case:
     return c
 
 
-@app.post("/api/cases/{cid}/investigate")
+@app.post("/api/cases/{cid}/investigate", dependencies=[ADMIN])
 def investigate(cid: int, s=Depends(db)):
     c = _case(s, cid)
     if c.status in ("actioned", "dismissed"):
@@ -147,7 +169,7 @@ class ApproveIn(BaseModel):
     recommendation_index: int
 
 
-@app.post("/api/cases/{cid}/approve")
+@app.post("/api/cases/{cid}/approve", dependencies=[ADMIN])
 def approve(cid: int, body: ApproveIn, s=Depends(db)):
     """The ONLY place money/state moves, and only after explicit merchant approval. Idempotent."""
     c = _case(s, cid)
@@ -197,7 +219,7 @@ def _dispute(s, did) -> Dispute:
     return d
 
 
-@app.post("/api/disputes/{did}/refresh")
+@app.post("/api/disputes/{did}/refresh", dependencies=[ADMIN])
 def dispute_refresh(did: str, s=Depends(db)):
     """Pull the latest dispute details from PayPal and re-link it to the buyer."""
     d = dsp.upsert_from_resource(s, paypal.get_dispute(did))
@@ -219,7 +241,7 @@ class EvidenceIn(BaseModel):
     method: str = "evidence"  # "evidence" or "message"
 
 
-@app.post("/api/disputes/{did}/evidence")
+@app.post("/api/disputes/{did}/evidence", dependencies=[ADMIN])
 def dispute_evidence(did: str, body: EvidenceIn, s=Depends(db)):
     """Sends evidence to PayPal. Only runs on explicit merchant approval; idempotent."""
     d = _dispute(s, did)

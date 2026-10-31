@@ -1,0 +1,73 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RingHunter</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#14181f;--mu:#66707f;--bd:#dde1e7;--ac:#0b5fff;--bad:#d93025;--warn:#e8a200;--ok:#188038}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1318;--card:#171c23;--tx:#e8ecf2;--mu:#98a2b3;--bd:#2a323d;--ac:#6ea1ff;--bad:#ff6b5e;--warn:#f2b83d;--ok:#4cc27a}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--bd);background:var(--card)}
+h1{font-size:18px;margin:0;flex:1}h2{font-size:15px;margin:0 0 8px}main{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;padding:16px 20px;max-width:1400px;margin:auto}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:16px}
+input,button{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+button{cursor:pointer}button.p{background:var(--ac);color:#fff;border-color:var(--ac)}button.d{border-color:var(--bad);color:var(--bad)}button:disabled{opacity:.5;cursor:default}
+.ag-theme-quartz{height:230px;width:100%}.pill{padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--bd)}
+.mu{color:var(--mu)}ul{margin:4px 0 10px;padding-left:18px}.rec{border:1px solid var(--bd);border-radius:8px;padding:10px;margin:8px 0}
+#toast{position:fixed;bottom:16px;right:16px;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;display:none;white-space:pre-wrap;font-size:12px}
+table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt th{border-bottom:1px solid var(--bd);padding:5px;text-align:left}
+</style></head><body>
+<header><h1>RingHunter <span class="mu" style="font-weight:400">fraud ring analyst for PayPal merchants</span></h1>
+<span id="health" class="pill">...</span>
+<input id="tok" type="password" placeholder="Admin token" size="14" autocomplete="off">
+<button id="seed">Load demo data</button><button class="p" id="detect">Run detection</button></header>
+<main><section><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
+<div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div></section>
+<section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div></section></main>
+<div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const STRONG=['device_id','card_fp'];let CASES=[],gridC,gridD;
+$('#tok').value=sessionStorage.tok||'';$('#tok').oninput=e=>sessionStorage.tok=e.target.value;
+function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t.h);t.h=setTimeout(()=>t.style.display='none',7000)}
+async function api(path,method='GET',body){const h={'Content-Type':'application/json'};if(sessionStorage.tok)h['X-Admin-Token']=sessionStorage.tok;
+ const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({}));
+ if(!r.ok)throw new Error(r.status===401?'Admin token required or wrong':(j.detail||r.status));return j}
+const split=c=>{const s=new Set();c.edges.forEach(e=>{if(e.shared_attributes.some(a=>STRONG.includes(a)))e.pair.forEach(m=>s.add(m))});return s};
+function mount(el,id,cols,rows,onSel){const box=$(id);
+ if(window.agGrid){if(el.g){el.g.setGridOption('rowData',rows);return el.g}
+  el.g=agGrid.createGrid(box,{columnDefs:cols,rowData:rows,rowSelection:'single',defaultColDef:{flex:1,minWidth:90,resizable:true,sortable:true},
+   onRowClicked:e=>onSel&&onSel(e.data)});return el.g}
+ box.style.height='auto';box.innerHTML='<table class="pt"><tr>'+cols.map(c=>'<th>'+c.headerName+'</th>').join('')+'</tr>'+
+  rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
+ box.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>onSel&&onSel(rows[tr.dataset.i]));return el}
+const gC={},gD={};
+async function load(){try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
+ CASES=await api('/api/cases');const D=await api('/api/disputes');
+ mount(gC,'#gc',[{field:'id',headerName:'ID',maxWidth:70},{field:'status',headerName:'Status'},
+  {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
+  {headerName:'Accounts',maxWidth:100,valueGetter:p=>p.data.cluster.cluster_size},{headerName:'Analyst',valueGetter:p=>p.data.casefile?p.data.casefile.analyst:'-'}],CASES,show);
+ mount(gD,'#gd',[{field:'id',headerName:'Dispute'},{field:'reason',headerName:'Reason'},{field:'status',headerName:'Status'},
+  {field:'amount',headerName:'USD',maxWidth:80},{headerName:'Ring',valueGetter:p=>p.data.ring?('case '+p.data.ring.case_id+' ('+p.data.ring.role+')'):'-'}],D)}
+function graph(c){const m=c.cluster.cluster_members,core=split(c.cluster),n=m.length,R=n>1?105:0,pos={};
+ m.forEach((x,i)=>{const a=2*Math.PI*i/n-Math.PI/2;pos[x]=[160+R*Math.cos(a),135+R*Math.sin(a)]});
+ const lines=c.cluster.edges.map(e=>{const [a,b]=e.pair,s=e.shared_attributes.some(x=>STRONG.includes(x));
+  return `<line x1="${pos[a][0]}" y1="${pos[a][1]}" x2="${pos[b][0]}" y2="${pos[b][1]}" stroke="${s?'var(--bad)':'var(--mu)'}" stroke-width="${1+e.edge_weight*3}" ${s?'':'stroke-dasharray="4 4"'}><title>${esc(a+' - '+b+': '+e.shared_attributes.join(', '))}</title></line>`}).join('');
+ const dots=m.map(x=>`<g><circle cx="${pos[x][0]}" cy="${pos[x][1]}" r="17" fill="${core.has(x)?'var(--bad)':'var(--warn)'}"><title>${esc(x)} (${core.has(x)?'core':'peripheral'})</title></circle><text x="${pos[x][0]}" y="${pos[x][1]+4}" text-anchor="middle" font-size="10" fill="#fff">${esc(x.slice(0,4))}</text></g>`).join('');
+ return `<svg viewBox="0 0 320 270" width="100%" role="img" aria-label="Account link graph">${lines}${dots}</svg><div class="mu" style="font-size:12px"><span style="color:var(--bad)">&#9679;</span> core (shared device/card, solid line) &nbsp; <span style="color:var(--warn)">&#9679;</span> peripheral (address/IP only, dashed)</div>`}
+function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.status);
+ let h=`<h2>Case ${c.id} <span class="pill">${esc(c.status)}</span> <span class="pill">${esc(c.decision.replace('FLAGGED_FOR_',''))} ${c.score}</span></h2>`+graph(c);
+ if(!f)h+=`<p><button class="p" id="inv" ${closed?'disabled':''}>Investigate with AI analyst</button></p>`;
+ else{h+=`<p>${esc(f.summary)}</p><p class="mu">Analyst: ${esc(f.analyst)} | confidence: ${esc(f.confidence)}${f.fallback_reason?' | fallback: '+esc(f.fallback_reason):''}</p>
+  <b>Evidence</b><ul>${f.key_evidence.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Caveats</b><ul>${f.caveats.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Recommended actions (need your approval)</b>`+
+  f.recommendations.map((r,i)=>`<div class="rec"><b>${esc(r.action.replace(/_/g,' '))}</b> <span class="mu">${esc(r.account_ids.join(', '))}</span><br>${esc(r.reason)}<br>
+   <button class="${r.action==='refund_transactions'?'d':'p'}" data-i="${i}" ${closed?'disabled':''}>Approve</button></div>`).join('')}
+ $('#detail').innerHTML=h;const b=$('#inv');if(b)b.onclick=async()=>{b.disabled=true;b.textContent='Analyzing...';try{await api('/api/cases/'+c.id+'/investigate','POST');await load();show(CASES.find(x=>x.id===c.id))}catch(e){toast(e.message);b.disabled=false}};
+ document.querySelectorAll('.rec button').forEach(b=>b.onclick=async()=>{const r=f.recommendations[b.dataset.i];
+  if(!confirm('Approve: '+r.action+' for '+r.account_ids.join(', ')+'?\nThis can move sandbox money.'))return;
+  try{const x=await api('/api/cases/'+c.id+'/approve','POST',{recommendation_index:+b.dataset.i});toast(JSON.stringify(x,null,1));await load();show(CASES.find(y=>y.id===c.id))}catch(e){toast(e.message)}})}
+$('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
+$('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};
+load().catch(e=>toast(e.message));
+</script></body></html>
