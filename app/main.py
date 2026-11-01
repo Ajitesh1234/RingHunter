@@ -147,12 +147,19 @@ def demo_reset(s=Depends(db)):
 
 @app.post("/api/detect", dependencies=[ADMIN])
 def detect(s=Depends(db)):
-    return [c.as_dict() for c in eng.detect(s)]
+    return [_out(s, c) for c in eng.detect(s)]
 
 
 @app.get("/api/cases")
 def cases(s=Depends(db)):
-    return [c.as_dict() for c in s.scalars(select(Case).where(Case.status != "superseded").order_by(Case.score.desc()))]
+    return [_out(s, c) for c in s.scalars(select(Case).where(Case.status != "superseded").order_by(Case.score.desc()))]
+
+
+def _out(s, c):
+    """Case plus the recommendation indexes already approved, so the dashboard can show per-action state."""
+    d = c.as_dict()
+    d["done"] = [int(a.key.split(":")[1]) for a in s.scalars(select(ActionLog).where(ActionLog.case_id == c.id))]
+    return d
 
 
 def _case(s, cid) -> Case:
@@ -171,7 +178,7 @@ def investigate(cid: int, s=Depends(db)):
     c.casefile_json = json.dumps({**cf.model_dump(), "analyst": model})
     c.status = "investigated"
     s.commit()
-    return c.as_dict()
+    return _out(s, c)
 
 
 class ApproveIn(BaseModel):
@@ -210,7 +217,10 @@ def approve(cid: int, body: ApproveIn, s=Depends(db)):
                 result["details"].append({"txn": t.id, "simulated": True})
             t.refunded = 1
     s.add(ActionLog(key=key, case_id=cid, action=rec["action"], result_json=json.dumps(result)))
-    c.status = "actioned" if rec["action"] != "no_action" else "dismissed"
+    if rec["action"] in ("hold_accounts", "refund_transactions"):
+        c.status = "actioned"
+    elif rec["action"] == "no_action":
+        c.status = "dismissed"  # request_more_info only logs a note, so the case stays open
     s.commit()
     return result
 

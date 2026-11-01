@@ -116,6 +116,10 @@ def _enforce(cf: CaseFile, members: set, core: set) -> CaseFile:
         kept.append(Recommendation(action=rec.action, account_ids=ids, reason=rec.reason))
     if not kept:
         raise ValueError("no valid recommendations after guardrails")
+    if core and not any(r.action == "refund_transactions" for r in kept):
+        kept.append(Recommendation(action="refund_transactions", account_ids=sorted(core),
+                                   reason="Optional merchant choice: refund the core accounts' payments to remove chargeback exposure. "
+                                          "The analyst did not recommend this at the current confidence level; approve only if you agree."))
     required = ["Heuristic graph scoring, not proof of fraud.",
                 "A patient adversary who staggers behaviour can evade it."]  # always shown, whatever the model says
     caveats = list(cf.caveats) + [c for c in required if c not in cf.caveats]

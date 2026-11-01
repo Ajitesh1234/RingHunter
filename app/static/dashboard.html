@@ -65,7 +65,7 @@ function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.s
  else{h+=`<p>${esc(f.summary)}</p><p class="mu">Analyst: ${esc(f.analyst)} | confidence: ${esc(f.confidence)}${f.fallback_reason?' | fallback: '+esc(f.fallback_reason):''}</p>
   <b>Evidence</b><ul>${f.key_evidence.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Caveats</b><ul>${f.caveats.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Recommended actions (need your approval)</b>`+
   f.recommendations.map((r,i)=>`<div class="rec"><b>${esc(r.action.replace(/_/g,' '))}</b> <span class="mu">${esc(r.account_ids.join(', '))}</span><br>${esc(r.reason)}<br>
-   <button class="${r.action==='refund_transactions'?'d':'p'}" data-i="${i}" ${closed?'disabled':''}>Approve</button></div>`).join('')}
+   <button class="${r.action==='refund_transactions'?'d':'p'}" data-i="${i}" ${(c.done||[]).includes(i)?'disabled':''}>${(c.done||[]).includes(i)?'Done':(r.action==='request_more_info'?'Mark as noted':'Approve')}</button></div>`).join('')}
  $('#detail').innerHTML=h;const b=$('#inv');if(b)b.onclick=async()=>{b.disabled=true;b.textContent='Analyzing...';try{await api('/api/cases/'+c.id+'/investigate','POST');await load();show(CASES.find(x=>x.id===c.id))}catch(e){toast(e.message);b.disabled=false}};
  document.querySelectorAll('.rec button').forEach(b=>b.onclick=async()=>{const r=f.recommendations[b.dataset.i];
   if(!confirm('Approve: '+r.action+' for '+r.account_ids.join(', ')+'?\nThis can move sandbox money.'))return;

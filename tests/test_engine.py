@@ -188,3 +188,21 @@ def test_demo_reset_clears_cases_but_keeps_disputes():
         assert c.post("/api/demo/reset").json() == {"reset": True}
         assert c.get("/api/cases").json() == []
         assert any(d["id"] == "PP-R-KEEP" for d in c.get("/api/disputes").json())
+
+
+def test_refund_is_always_offered_as_optional_and_more_info_keeps_case_open():
+    from app.investigator import _enforce, CaseFile, Recommendation
+    cf = CaseFile(summary="s", confidence="medium", key_evidence=["e"], caveats=[],
+                  recommendations=[Recommendation(action="hold_accounts", account_ids=["A", "B"], reason="r")])
+    out = _enforce(cf, {"A", "B"}, {"A", "B"})
+    assert [r.action for r in out.recommendations] == ["hold_accounts", "refund_transactions"]
+    assert "approve only if you agree" in out.recommendations[1].reason
+    with TestClient(app) as c:
+        c.post("/api/demo/seed")
+        cid = c.get("/api/cases").json()[0]["id"]
+        c.post(f"/api/cases/{cid}/investigate")
+        first = c.get("/api/cases").json()[0]
+        assert first["done"] == []
+        c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
+        again = [x for x in c.get("/api/cases").json() if x["id"] == cid][0]
+        assert again["done"] == [0] and again["status"] == "actioned"
