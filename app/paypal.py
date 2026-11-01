@@ -37,8 +37,8 @@ def _call(method: str, path: str, body: dict | None = None, request_id: str | No
     return r.json() if r.content else {}
 
 
-def create_order(amount: str, currency: str, return_url: str, cancel_url: str) -> dict:
-    body = {"intent": "CAPTURE",
+def create_order(amount: str, currency: str, return_url: str, cancel_url: str, intent: str = "CAPTURE") -> dict:
+    body = {"intent": intent,
             "purchase_units": [{"amount": {"currency_code": currency, "value": amount}}],
             "payment_source": {"paypal": {"experience_context": {
                 "return_url": return_url, "cancel_url": cancel_url,
@@ -54,6 +54,18 @@ def get_order(order_id: str) -> dict:
 
 def capture_order(order_id: str) -> dict:
     return _call("POST", f"/v2/checkout/orders/{order_id}/capture", {}, request_id=f"cap-{order_id}")
+
+
+def authorize_order(order_id: str) -> dict:
+    return _call("POST", f"/v2/checkout/orders/{order_id}/authorize", {}, request_id=f"auth-{order_id}")
+
+
+def capture_authorization(auth_id: str) -> dict:
+    return _call("POST", f"/v2/payments/authorizations/{auth_id}/capture", {"final_capture": True}, request_id=f"capauth-{auth_id}")
+
+
+def void_authorization(auth_id: str) -> dict:
+    return _call("POST", f"/v2/payments/authorizations/{auth_id}/void", None, request_id=f"void-{auth_id}")
 
 
 def refund_capture(capture_id: str, request_id: str) -> dict:

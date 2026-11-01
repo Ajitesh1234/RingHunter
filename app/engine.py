@@ -56,6 +56,6 @@ def detect(s) -> list[Case]:
 
 
 def exposure(s, members):
-    rows = list(s.scalars(select(Txn).where(Txn.account_id.in_(members))))
+    rows = list(s.scalars(select(Txn).where(Txn.account_id.in_(members), Txn.capture_id.isnot(None))))
     return {"transactions": len(rows), "total_amount": round(sum(r.amount for r in rows), 2),
             "refundable": [r.id for r in rows if r.capture_id and not r.refunded]}

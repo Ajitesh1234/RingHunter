@@ -17,13 +17,16 @@ button{cursor:pointer}button.p{background:var(--ac);color:#fff;border-color:var(
 .mu{color:var(--mu)}ul{margin:4px 0 10px;padding-left:18px}.rec{border:1px solid var(--bd);border-radius:8px;padding:10px;margin:8px 0}
 #toast{position:fixed;bottom:16px;right:16px;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;display:none;white-space:pre-wrap;font-size:12px}
 table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt th{border-bottom:1px solid var(--bd);padding:5px;text-align:left}
+.tiles{display:flex;gap:12px;flex-wrap:wrap;padding:16px 20px 0;max-width:1400px;margin:auto}.tile{flex:1;min-width:160px;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px}.tile b{font-size:22px;display:block}
 </style></head><body>
 <header><h1>RingHunter <span class="mu" style="font-weight:400">fraud ring analyst for PayPal merchants</span></h1>
 <span id="health" class="pill">...</span>
 <input id="tok" type="password" placeholder="Admin token" size="14" autocomplete="off">
 <button id="seed">Load demo data</button><button class="d" id="reset">Reset demo</button><button class="p" id="detect">Run detection</button></header>
+<div id="tiles" class="tiles"></div>
 <main><section><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
-<div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div></section>
+<div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
+<div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div></section>
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div></section></main>
 <div id="toast"></div>
 <script>
@@ -46,7 +49,7 @@ function mount(el,id,cols,rows,onSel){const box=$(id);
   rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
  box.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>onSel&&onSel(rows[tr.dataset.i]));return el}
 const gC={},gD={};
-async function load(){try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
+async function load(){loadOrders().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
  CASES=await api('/api/cases');const D=await api('/api/disputes');
  mount(gC,'#gc',[{field:'id',headerName:'ID',maxWidth:70},{field:'status',headerName:'Status'},
   {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
@@ -70,6 +73,14 @@ function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.s
  document.querySelectorAll('.rec button').forEach(b=>b.onclick=async()=>{const r=f.recommendations[b.dataset.i];
   if(!confirm('Approve: '+r.action+' for '+r.account_ids.join(', ')+'?\nThis can move sandbox money.'))return;
   try{const x=await api('/api/cases/'+c.id+'/approve','POST',{recommendation_index:+b.dataset.i});toast(JSON.stringify(x,null,1));await load();show(CASES.find(y=>y.id===c.id))}catch(e){toast(e.message)}})}
+const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><span class="mu" style="font-size:12px">${c}</span></div>`;
+async function loadOrders(){const O=await api('/api/orders'),sum=s=>O.filter(o=>o.status===s).reduce((a,o)=>a+o.amount,0).toFixed(2);
+ $('#tiles').innerHTML=tile('Prevented','$'+sum('voided'),'voided before any money moved')+tile('Pending review','$'+sum('pending_review'),'authorized, awaiting your decision')+tile('Captured','$'+sum('captured'),'charged normally');
+ const P=O.filter(o=>o.status==='pending_review');
+ $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
+ document.querySelectorAll('#pend button').forEach(b=>b.onclick=async()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
+  if(!confirm((cap?'Capture (charge) ':'Void (release the hold on) ')+'this order?'))return;
+  try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})}
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=async()=>{if(!confirm('Wipe accounts, transactions and cases on this server? Disputes are kept.'))return;try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(e){toast(e.message)}};
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

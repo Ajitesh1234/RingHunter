@@ -78,6 +78,19 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class Order(Base):  # screened checkout: authorized first, captured or voided after review
+    __tablename__ = "orders"
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal order id
+    account_id: Mapped[str] = mapped_column(String, index=True)
+    auth_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    amount: Mapped[float] = mapped_column(Float)
+    ts: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="authorized")  # authorized|pending_review|captured|voided
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    case_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capture_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class Dispute(Base):  # PayPal disputes received via webhook
     __tablename__ = "disputes"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal dispute id (PP-R-...)

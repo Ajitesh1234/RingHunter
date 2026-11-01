@@ -9,6 +9,7 @@ class Settings:
     paypal_secret = os.getenv("PAYPAL_SECRET", "")
     paypal_webhook_id = os.getenv("PAYPAL_WEBHOOK_ID", "")
     paypal_base = "https://api-m.sandbox.paypal.com"  # sandbox only, by design
+    screening = os.getenv("SCREENING", "off").lower() in ("on", "1", "true")  # authorize-then-screen checkout
     admin_token = os.getenv("ADMIN_TOKEN", "")  # empty = open (local dev)
     groq_key = os.getenv("GROQ_API_KEY", "")
     groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")

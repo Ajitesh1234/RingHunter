@@ -206,3 +206,74 @@ def test_refund_is_always_offered_as_optional_and_more_info_keeps_case_open():
         c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
         again = [x for x in c.get("/api/cases").json() if x["id"] == cid][0]
         assert again["done"] == [0] and again["status"] == "actioned"
+
+
+def test_create_order_supports_authorize_intent(monkeypatch):
+    from app import paypal
+    seen = {}
+    def fake(method, path, body=None, request_id=None):
+        seen.update(path=path, body=body)
+        return {"id": "O1", "links": [{"rel": "payer-action", "href": "https://x"}]}
+    monkeypatch.setattr(paypal, "_call", fake)
+    out = paypal.create_order("25.00", "USD", "r", "c", intent="AUTHORIZE")
+    assert seen["body"]["intent"] == "AUTHORIZE" and out["id"] == "O1"
+    paypal.create_order("25.00", "USD", "r", "c")
+    assert seen["body"]["intent"] == "CAPTURE"  # default behaviour unchanged
+
+
+def test_screening_holds_strong_linked_buyer_and_captures_weak_ones():
+    from app.db import SessionLocal, Account, Txn, init_db
+    from app import screening
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="S1", device_id="devS", ip="9.9.9.1", shipping_address="x|1|us"))
+    s.merge(Txn(id="CAPS1", account_id="S1", ts="2026-10-28T11:00:00", amount=25.0, capture_id="CAPS1"))
+    s.merge(Account(id="S2", device_id="devS", ip="9.9.9.2", shipping_address="y|1|us"))
+    s.merge(Txn(id="auth:A2", account_id="S2", ts="2026-10-28T11:02:00", amount=25.0, capture_id=None))
+    s.merge(Account(id="S3", device_id="devOther", ip="9.9.9.3", shipping_address="x|1|us"))
+    s.merge(Txn(id="auth:A3", account_id="S3", ts="2026-10-28T11:03:00", amount=25.0, capture_id=None))
+    s.commit()
+    assert screening.screen(s, "S2")[0] is True     # shares a device with S1: held for review
+    assert screening.screen(s, "S3")[0] is False    # address-only link: weak evidence, captured normally
+
+
+def test_order_capture_and_void_are_idempotent_and_exclusive(monkeypatch):
+    from app import paypal
+    from app.db import SessionLocal, Account, Txn, Order, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="V1", device_id="dv", ip="1", shipping_address="a"))
+    for n in ("1", "2"):
+        s.merge(Txn(id=f"auth:AV{n}", account_id="V1", ts="2026-10-28T12:00:00", amount=25.0))
+        s.merge(Order(id=f"OV{n}", account_id="V1", auth_id=f"AV{n}", amount=25.0, ts="2026-10-28T12:00:00", status="pending_review"))
+    s.commit()
+    monkeypatch.setattr(paypal, "capture_authorization", lambda a: {"id": "CAP-" + a, "status": "COMPLETED"})
+    monkeypatch.setattr(paypal, "void_authorization", lambda a: {})
+    with TestClient(app) as c:
+        assert c.post("/api/orders/OV1/capture").json()["status"] == "captured"
+        assert c.post("/api/orders/OV1/capture").json()["idempotent_replay"] is True
+        assert c.post("/api/orders/OV1/void").status_code == 409
+        assert c.post("/api/orders/OV2/void").json()["status"] == "voided"
+        assert c.post("/api/orders/OV2/void").json()["idempotent_replay"] is True
+        assert c.post("/api/orders/OV2/capture").status_code == 409
+
+
+def test_screened_checkout_end_to_end_with_mocked_paypal(monkeypatch):
+    from app import paypal
+    from app.config import settings
+    monkeypatch.setattr(settings, "screening", True, raising=False)
+    def mk(pid, n):
+        return {"payer": {"payer_id": pid, "email_address": f"{pid}@x.test"},
+                "purchase_units": [{"shipping": {"address": {"address_line_1": f"{n} elm st", "postal_code": str(n), "country_code": "US"}},
+                                    "payments": {"authorizations": [{"id": f"AUTH-{pid}", "amount": {"value": "25.00", "currency_code": "USD"}}]}}]}
+    payers = {"TOK-E1": "E1", "TOK-E2": "E2"}
+    monkeypatch.setattr(paypal, "get_order", lambda t: {"payer": {"payer_id": payers[t]}})
+    monkeypatch.setattr(paypal, "authorize_order", lambda t: mk(payers[t], 10 if t == "TOK-E1" else 20))
+    monkeypatch.setattr(paypal, "capture_authorization", lambda a: {"id": "CAP-" + a, "status": "COMPLETED"})
+    with TestClient(app) as c:
+        r1 = c.get("/checkout/return", params={"token": "TOK-E1", "dev": "e2e-ring"})
+        r2 = c.get("/checkout/return", params={"token": "TOK-E2", "dev": "e2e-ring"})
+        orders = {o["id"]: o for o in c.get("/api/orders").json()}
+        assert "payment received" in r1.text and orders["TOK-E1"]["status"] == "captured"
+        assert "being reviewed" in r2.text and orders["TOK-E2"]["status"] == "pending_review"
+        assert "device or card" in orders["TOK-E2"]["reason"]

@@ -8,9 +8,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator, disputes as dsp, llm
+from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening
 from .config import settings
-from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, now
+from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, now
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -50,7 +50,7 @@ def dashboard():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider(), "admin_protected": bool(settings.admin_token)}
+    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider(), "admin_protected": bool(settings.admin_token), "screening": settings.screening}
 
 
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
@@ -79,7 +79,7 @@ def checkout_create(body: CreateIn, request: Request):
     if not paypal.enabled():
         raise HTTPException(503, "PayPal sandbox credentials not configured")
     o = paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
-                            f"{settings.base_url}/")
+                            f"{settings.base_url}/", intent="AUTHORIZE" if settings.screening else "CAPTURE")
     return o
 
 
@@ -89,6 +89,8 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     pre_pid = order.get("payer", {}).get("payer_id")
     if pre_pid and s.get(Blocked, pre_pid):
         return "<h3>Order declined.</h3>"  # never captured, so no money moves
+    if settings.screening:
+        return _screened_checkout(s, request, token, dev)
     cap = paypal.capture_order(token)
     payer = cap.get("payer", {})
     pid = payer.get("payer_id")
@@ -108,6 +110,80 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     s.commit()
     eng.detect(s)
     return "<h3>Thanks, payment received.</h3>"
+
+
+def _screened_checkout(s, request, token, dev):
+    """Authorize (no money taken), screen the buyer against known rings, then capture or hold for review."""
+    auth = paypal.authorize_order(token)
+    payer = auth.get("payer", {})
+    pid = payer.get("payer_id")
+    pu = auth["purchase_units"][0]
+    a = pu["payments"]["authorizations"][0]
+    addr = pu.get("shipping", {}).get("address", {})
+    shipping = "|".join(str(addr.get(k, "")).lower().strip() for k in ("address_line_1", "postal_code", "country_code")) or None
+    ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
+    ts = now().replace(tzinfo=None).isoformat(timespec="seconds")
+    amount = float(a["amount"]["value"])
+    s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip, shipping_address=shipping))
+    s.merge(Txn(id=f"auth:{a['id']}", account_id=pid, ts=ts, amount=amount, capture_id=None))
+    s.merge(Order(id=token, account_id=pid, auth_id=a["id"], amount=amount, ts=ts, status="authorized"))
+    s.commit()
+    o = s.get(Order, token)
+    hold, case_id, reason = screening.screen(s, pid)
+    if hold:
+        o.status, o.reason, o.case_id = "pending_review", reason, case_id
+        s.commit()
+        return "<h3>Thanks. Your order is being reviewed. You have not been charged yet.</h3>"
+    screening.capture_order(s, o)
+    s.commit()
+    eng.detect(s)
+    return "<h3>Thanks, payment received.</h3>"
+
+
+# ---------- orders held for review ----------
+@app.get("/api/orders")
+def list_orders(s=Depends(db)):
+    rows = s.scalars(select(Order).order_by(Order.ts.desc()))
+    return [{"id": o.id, "account_id": o.account_id, "amount": o.amount, "ts": o.ts, "status": o.status,
+             "reason": o.reason, "case_id": o.case_id, "capture_id": o.capture_id} for o in rows]
+
+
+def _order(s, oid) -> Order:
+    o = s.get(Order, oid)
+    if not o:
+        raise HTTPException(404, "order not found")
+    return o
+
+
+@app.post("/api/orders/{oid}/capture", dependencies=[ADMIN])
+def order_capture(oid: str, s=Depends(db)):
+    o = _order(s, oid)
+    if o.status == "captured":
+        return {"idempotent_replay": True, "status": o.status}
+    if o.status == "voided":
+        raise HTTPException(409, "order was voided")
+    try:
+        screening.capture_order(s, o)
+    except paypal.PayPalError as e:
+        raise HTTPException(502, f"PayPal rejected the capture: {e}")
+    s.commit()
+    eng.detect(s)
+    return {"status": o.status, "capture_id": o.capture_id}
+
+
+@app.post("/api/orders/{oid}/void", dependencies=[ADMIN])
+def order_void(oid: str, s=Depends(db)):
+    o = _order(s, oid)
+    if o.status == "voided":
+        return {"idempotent_replay": True, "status": o.status}
+    if o.status == "captured":
+        raise HTTPException(409, "order already captured; use refund instead")
+    try:
+        screening.void_order(s, o)
+    except paypal.PayPalError as e:
+        raise HTTPException(502, f"PayPal rejected the void: {e}")
+    s.commit()
+    return {"status": o.status}
 
 
 # ---------- verified PayPal webhooks ----------
@@ -139,7 +215,7 @@ def demo_seed(s=Depends(db)):
 @app.post("/api/demo/reset", dependencies=[ADMIN])
 def demo_reset(s=Depends(db)):
     """Clears accounts, transactions, cases, actions and holds so a demo can start clean. Disputes are kept."""
-    for m in (ActionLog, Blocked, Case, Txn, Account):
+    for m in (ActionLog, Blocked, Case, Txn, Account, Order):
         s.query(m).delete()
     s.commit()
     return {"reset": True}
