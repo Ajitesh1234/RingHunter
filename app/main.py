@@ -103,13 +103,26 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
         paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")
         return "<h3>Order declined.</h3>"
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
-    s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip,
-                    shipping_address=shipping))  # PayPal gives no signup time; first-seen time would be a fake signal
+    _upsert_account(s, pid, payer.get("email_address"), dev, ip, shipping)
     s.merge(Txn(id=c["id"], account_id=pid, ts=now().replace(tzinfo=None).isoformat(timespec="seconds"),
                 amount=float(c["amount"]["value"]), capture_id=c["id"]))
     s.commit()
     eng.detect(s)
     return "<h3>Thanks, payment received.</h3>"
+
+
+def _upsert_account(s, pid, email, dev, ip, shipping):
+    """Identifiers are sticky: the first-seen device, IP and address are kept. A returning account therefore
+    cannot shake its ring links just by switching browser or address before screening runs."""
+    a = s.get(Account, pid)
+    if a:
+        a.email = a.email or email
+        a.device_id = a.device_id or dev or None
+        a.ip = a.ip or ip
+        a.shipping_address = a.shipping_address or shipping
+    else:
+        s.add(Account(id=pid, email=email, device_id=dev or None, ip=ip, shipping_address=shipping))
+        s.flush()
 
 
 def _screened_checkout(s, request, token, dev):
@@ -124,7 +137,7 @@ def _screened_checkout(s, request, token, dev):
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     ts = now().replace(tzinfo=None).isoformat(timespec="seconds")
     amount = float(a["amount"]["value"])
-    s.merge(Account(id=pid, email=payer.get("email_address"), device_id=dev or None, ip=ip, shipping_address=shipping))
+    _upsert_account(s, pid, payer.get("email_address"), dev, ip, shipping)
     s.merge(Txn(id=f"auth:{a['id']}", account_id=pid, ts=ts, amount=amount, capture_id=None))
     s.merge(Order(id=token, account_id=pid, auth_id=a["id"], amount=amount, ts=ts, status="authorized"))
     s.commit()

@@ -277,3 +277,24 @@ def test_screened_checkout_end_to_end_with_mocked_paypal(monkeypatch):
         assert "payment received" in r1.text and orders["TOK-E1"]["status"] == "captured"
         assert "being reviewed" in r2.text and orders["TOK-E2"]["status"] == "pending_review"
         assert "device or card" in orders["TOK-E2"]["reason"]
+
+
+def test_returning_buyer_cannot_shake_ring_by_switching_device(monkeypatch):
+    from app import paypal
+    from app.config import settings
+    from app.db import SessionLocal, Account
+    monkeypatch.setattr(settings, "screening", True, raising=False)
+    def mk(pid, n):
+        return {"payer": {"payer_id": pid, "email_address": f"{pid}@x.test"},
+                "purchase_units": [{"shipping": {"address": {"address_line_1": f"{n} oak st", "postal_code": str(n), "country_code": "US"}},
+                                    "payments": {"authorizations": [{"id": f"AUTH-{pid}-{n}", "amount": {"value": "25.00", "currency_code": "USD"}}]}}]}
+    seq = {"T1": ("R9A", 1), "T2": ("R9B", 2), "T3": ("R9A", 3)}   # R9A comes back
+    monkeypatch.setattr(paypal, "get_order", lambda t: {"payer": {"payer_id": seq[t][0]}})
+    monkeypatch.setattr(paypal, "authorize_order", lambda t: mk(*seq[t]))
+    monkeypatch.setattr(paypal, "capture_authorization", lambda a: {"id": "CAP-" + a, "status": "COMPLETED"})
+    with TestClient(app) as c:
+        c.get("/checkout/return", params={"token": "T1", "dev": "sticky-ring"})
+        c.get("/checkout/return", params={"token": "T2", "dev": "sticky-ring"})
+        r3 = c.get("/checkout/return", params={"token": "T3", "dev": "a-brand-new-browser"})   # tries to shake the link
+        assert SessionLocal().get(Account, "R9A").device_id == "sticky-ring"
+        assert "being reviewed" in r3.text
