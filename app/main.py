@@ -136,6 +136,15 @@ def demo_seed(s=Depends(db)):
     return {"flagged_cases": [c.id for c in cases]}
 
 
+@app.post("/api/demo/reset", dependencies=[ADMIN])
+def demo_reset(s=Depends(db)):
+    """Clears accounts, transactions, cases, actions and holds so a demo can start clean. Disputes are kept."""
+    for m in (ActionLog, Blocked, Case, Txn, Account):
+        s.query(m).delete()
+    s.commit()
+    return {"reset": True}
+
+
 @app.post("/api/detect", dependencies=[ADMIN])
 def detect(s=Depends(db)):
     return [c.as_dict() for c in eng.detect(s)]

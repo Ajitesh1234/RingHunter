@@ -174,3 +174,17 @@ def test_admin_token_guards_state_changing_endpoints(monkeypatch):
         assert c.post("/api/detect", headers={"X-Admin-Token": "s3cret"}).status_code == 200
         assert c.get("/api/cases").status_code == 200       # read-only stays public
         assert c.get("/dashboard").status_code == 200
+
+
+def test_demo_reset_clears_cases_but_keeps_disputes():
+    from app.db import SessionLocal, Dispute, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Dispute(id="PP-R-KEEP", raw_json="{}", evidence_submitted=0))
+    s.commit()
+    with TestClient(app) as c:
+        c.post("/api/demo/seed")
+        assert c.get("/api/cases").json()
+        assert c.post("/api/demo/reset").json() == {"reset": True}
+        assert c.get("/api/cases").json() == []
+        assert any(d["id"] == "PP-R-KEEP" for d in c.get("/api/disputes").json())
