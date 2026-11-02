@@ -336,3 +336,18 @@ def test_eval_endpoint_is_public_and_capped():
     with TestClient(app) as c:
         r = c.get("/api/eval", params={"seeds": 999}).json()
         assert r["trials_per_scenario"] == 40 and r["summary"]["avg_innocent_groups_disrupted_pct"] == 0
+
+
+def test_orders_report_which_captured_payments_were_refunded():
+    from app.db import SessionLocal, Account, Txn, Order, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="RF1", device_id="rf", ip="1", shipping_address="a"))
+    s.merge(Txn(id="CAP-RF", account_id="RF1", ts="2026-11-02T10:00:00", amount=25.0, capture_id="CAP-RF", refunded=1))
+    s.merge(Txn(id="CAP-KEEP", account_id="RF1", ts="2026-11-02T10:01:00", amount=25.0, capture_id="CAP-KEEP", refunded=0))
+    s.merge(Order(id="ORF", account_id="RF1", auth_id="A1", amount=25.0, ts="2026-11-02T10:00:00", status="captured", capture_id="CAP-RF"))
+    s.merge(Order(id="OKEEP", account_id="RF1", auth_id="A2", amount=25.0, ts="2026-11-02T10:01:00", status="captured", capture_id="CAP-KEEP"))
+    s.commit()
+    with TestClient(app) as c:
+        o = {x["id"]: x for x in c.get("/api/orders").json()}
+        assert o["ORF"]["refunded"] is True and o["OKEEP"]["refunded"] is False

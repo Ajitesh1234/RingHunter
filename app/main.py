@@ -162,9 +162,11 @@ def _screened_checkout(s, request, token, dev):
 # ---------- orders held for review ----------
 @app.get("/api/orders")
 def list_orders(s=Depends(db)):
-    rows = s.scalars(select(Order).order_by(Order.ts.desc()))
+    rows = list(s.scalars(select(Order).order_by(Order.ts.desc())))
+    refunded = {x.id for x in s.scalars(select(Txn).where(Txn.refunded == 1))}
     return [{"id": o.id, "account_id": o.account_id, "amount": o.amount, "ts": o.ts, "status": o.status,
-             "reason": o.reason, "case_id": o.case_id, "capture_id": o.capture_id} for o in rows]
+             "reason": o.reason, "case_id": o.case_id, "capture_id": o.capture_id,
+             "refunded": o.capture_id in refunded} for o in rows]
 
 
 def _order(s, oid) -> Order:

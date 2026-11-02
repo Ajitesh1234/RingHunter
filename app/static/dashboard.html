@@ -80,8 +80,8 @@ function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.s
  document.querySelectorAll('.rec button').forEach(b=>b.onclick=()=>{
   twoStep(b,'Click again to confirm',async()=>{try{const x=await api('/api/cases/'+c.id+'/approve','POST',{recommendation_index:+b.dataset.i});toast(JSON.stringify(x,null,1));await load();show(CASES.find(y=>y.id===c.id))}catch(e){toast(e.message)}})})}
 const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><span class="mu" style="font-size:12px">${c}</span></div>`;
-async function loadOrders(){const O=await api('/api/orders'),sum=s=>O.filter(o=>o.status===s).reduce((a,o)=>a+o.amount,0).toFixed(2);
- $('#tiles').innerHTML=tile('Prevented','$'+sum('voided'),'voided before any money moved')+tile('Pending review','$'+sum('pending_review'),'authorized, awaiting your decision')+tile('Captured','$'+sum('captured'),'charged normally');
+async function loadOrders(){const O=await api('/api/orders'),sum=f=>O.filter(f).reduce((a,o)=>a+o.amount,0).toFixed(2);
+ $('#tiles').innerHTML=tile('Prevented','$'+sum(o=>o.status==='voided'),'voided before any money moved')+tile('Pending review','$'+sum(o=>o.status==='pending_review'),'authorized, awaiting your decision')+tile('Captured (net)','$'+sum(o=>o.status==='captured'&&!o.refunded),'charged and kept')+tile('Refunded','$'+sum(o=>o.status==='captured'&&o.refunded),'charged, then refunded');
  const P=O.filter(o=>o.status==='pending_review');
  $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
  document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
