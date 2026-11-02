@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening
+from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, now
 
@@ -123,6 +123,12 @@ def _upsert_account(s, pid, email, dev, ip, shipping):
     else:
         s.add(Account(id=pid, email=email, device_id=dev or None, ip=ip, shipping_address=shipping))
         s.flush()
+
+
+@app.get("/api/eval")
+def run_evaluation(seeds: int = 20):
+    """Attacks our own screening with synthetic rings and innocent look-alikes. Read-only, in memory, no PayPal calls."""
+    return evaluation.run_eval(seeds)
 
 
 def _screened_checkout(s, request, token, dev):

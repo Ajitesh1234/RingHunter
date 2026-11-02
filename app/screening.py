@@ -1,9 +1,17 @@
 """Pre-capture screening: authorize first, then decide. Only buyers with a STRONG link (shared device or card)
 to a flagged ring are held; address/IP-only links are weak evidence and are captured normally."""
 import json
+from sqlalchemy import select
 from . import engine as eng, paypal
-from .db import Txn, Order
+from .db import Txn, Order, Account
 from .investigator import split_members
+
+
+def spread_rule(shipping_addresses) -> bool:
+    """One device used by 3+ accounts that ship to 3+ different addresses. Catches slow rings that dodge the timing signal,
+    while a household sharing one device and one address is left alone."""
+    addrs = {a for a in shipping_addresses if a}
+    return len(shipping_addresses) >= 3 and len(addrs) >= 3
 
 
 def screen(s, account_id):
@@ -14,6 +22,12 @@ def screen(s, account_id):
             core, _ = split_members(entry)
             if account_id in core:
                 return True, c.id, f"Shares a device or card with other accounts in case {c.id} (score {c.score})."
+    me = s.get(Account, account_id)
+    if me and me.device_id:
+        group = list(s.scalars(select(Account).where(Account.device_id == me.device_id)))
+        if spread_rule([g.shipping_address for g in group]):
+            n_addr = len({g.shipping_address for g in group if g.shipping_address})
+            return True, None, f"One device is used by {len(group)} accounts shipping to {n_addr} different addresses."
     return False, None, None
 
 

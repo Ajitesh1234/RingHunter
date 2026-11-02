@@ -1,0 +1,97 @@
+"""Self-evaluation: attack our own screening with synthetic rings and innocent look-alikes, and report the results.
+Runs entirely in memory (no database, no PayPal). It replays purchases in time order, exactly like the live checkout:
+after each purchase it runs detection and HOLDS the buyer only if they share a device or card with a flagged ring."""
+import random
+from datetime import datetime, timedelta
+from . import detection_core as core
+from .investigator import split_members
+from .screening import spread_rule
+
+T0 = datetime(2026, 11, 2, 10, 0, 0)
+PRICE = 25.0
+
+# name, kind, device, address, ip, gap (low, high, unit), group size range
+ATTACKS = [
+    ("Same device, buying within minutes", "shared", "unique", "unique", (1, 4, "m")),
+    ("Same device + shared address, within minutes", "shared", "shared", "unique", (1, 4, "m")),
+    ("Same device, spread over days", "shared", "unique", "unique", (6, 30, "h")),
+    ("Chain: neighbours share a device or address", "chain", "chain", "unique", (1, 4, "m")),
+    ("Rotating devices, shared address only (blind spot)", "unique", "shared", "unique", (1, 4, "m")),
+]
+INNOCENT = [
+    ("Strangers: nothing shared", "unique", "unique", "unique", (1, 60, "m")),
+    ("Office: shared IP only", "unique", "unique", "shared", (5, 60, "m")),
+    ("Family: shared address, own devices, hours apart", "unique", "shared", "unique", (2, 10, "h")),
+    ("Roommates: shared address + IP, same evening", "unique", "shared", "shared", (10, 120, "m")),
+    ("Family tablet: one device, days apart (hard case)", "shared", "shared", "unique", (24, 120, "h")),
+]
+
+
+def _value(mode, tag, i):
+    if mode == "shared":
+        return f"{tag}-shared"
+    if mode == "chain":
+        return f"{tag}-{i // 2}" if tag == "dev" else f"{tag}-{(i + 1) // 2}"
+    return f"{tag}-{i}"
+
+
+def _purchases(spec, n, rng, label):
+    _, dev, addr, ip, (lo, hi, unit) = spec
+    t, out = T0, []
+    for i in range(n):
+        out.append({"id": f"{label}-{i}", "device": _value(dev, f"{label}-dev", i), "addr": _value(addr, f"{label}-adr", i),
+                    "ip": _value(ip, f"{label}-ip", i), "ts": t})
+        t += timedelta(**{"minutes" if unit == "m" else "hours": rng.uniform(lo, hi)})
+    return out
+
+
+def replay(purchases, use_spread=True):
+    """Which purchases would live screening hold? (the first buyer of a ring can never be caught: nothing links them yet)"""
+    accounts, txns, held = {}, {}, []
+    for p in purchases:
+        accounts[p["id"]] = {"device_id": p["device"], "card_fp": f"none_card_{p['id']}", "ip": p["ip"],
+                             "shipping_address": p["addr"]}
+        txns[p["id"]] = [{"timestamp": p["ts"].isoformat(timespec="seconds"), "amount": PRICE}]
+        trail, _ = core.run_detection(accounts, txns)
+        hold = False
+        for e in trail:
+            if e["decision"] != "NOT_FLAGGED" and e["cluster_size"] >= 2 and p["id"] in e["cluster_members"]:
+                if p["id"] in split_members(e)[0]:
+                    hold = True
+        if use_spread and not hold:
+            group = [a for a in accounts.values() if a["device_id"] == p["device"]]
+            hold = spread_rule([a["shipping_address"] for a in group])
+        held.append(hold)
+    return held
+
+
+def run_eval(seeds: int = 20) -> dict:
+    seeds = max(1, min(int(seeds), 40))
+    attacks, innocent = [], []
+    for k, spec in enumerate(ATTACKS):
+        blocked, before, prevented = [], [], []
+        for s in range(seeds):
+            rng = random.Random(1000 * k + s)
+            n = rng.randint(3, 6)
+            ps = _purchases(spec, n, rng, f"a{k}t{s}")
+            held = replay(ps)
+            blocked.append(sum(held[1:]) / (n - 1))
+            before.append(sum(replay(ps, use_spread=False)[1:]) / (n - 1))
+            prevented.append(PRICE * sum(held[1:]))
+        attacks.append({"name": spec[0], "blocked_pct": round(100 * sum(blocked) / seeds),
+                        "before_spread_rule_pct": round(100 * sum(before) / seeds),
+                        "avg_prevented_usd": round(sum(prevented) / seeds, 2)})
+    for k, spec in enumerate(INNOCENT):
+        affected = 0
+        for s in range(seeds):
+            rng = random.Random(5000 + 1000 * k + s)
+            n = rng.randint(2, 4)
+            if any(replay(_purchases(spec, n, rng, f"i{k}t{s}"))):
+                affected += 1
+        innocent.append({"name": spec[0], "groups_affected_pct": round(100 * affected / seeds)})
+    scored = [a for a in attacks if "blind spot" not in a["name"]]
+    return {"trials_per_scenario": seeds, "attacks": attacks, "innocent": innocent,
+            "summary": {"avg_followup_buyers_blocked_pct": round(sum(a["blocked_pct"] for a in scored) / len(scored)),
+                        "avg_innocent_groups_disrupted_pct": round(sum(i["groups_affected_pct"] for i in innocent) / len(innocent))},
+            "note": "Synthetic scenarios generated by us, replayed through the same detector and hold rule the live checkout uses. "
+                    "The first buyer in a ring can never be blocked. Real traffic will differ. Averages exclude the labelled blind spot."}

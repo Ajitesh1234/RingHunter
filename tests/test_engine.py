@@ -298,3 +298,41 @@ def test_returning_buyer_cannot_shake_ring_by_switching_device(monkeypatch):
         r3 = c.get("/checkout/return", params={"token": "T3", "dev": "a-brand-new-browser"})   # tries to shake the link
         assert SessionLocal().get(Account, "R9A").device_id == "sticky-ring"
         assert "being reviewed" in r3.text
+
+
+def test_spread_rule_holds_slow_ring_but_not_a_household():
+    from app.screening import spread_rule
+    assert spread_rule(["a", "b", "c"]) is True
+    assert spread_rule(["a", "a", "a"]) is False   # a household: one device, one address
+    assert spread_rule(["a", "b"]) is False
+
+
+def test_screen_holds_third_buyer_on_a_device_shipping_to_three_addresses():
+    from app.db import SessionLocal, Account, Txn, init_db
+    from app import screening
+    init_db()
+    s = SessionLocal()
+    for i, day in enumerate(("10", "13", "16")):   # days apart, so the timing signal is quiet
+        s.merge(Account(id=f"SP{i}", device_id="spread-dev", ip=f"7.7.7.{i}", shipping_address=f"{i} road|{i}|us"))
+        s.merge(Txn(id=f"auth:SP{i}", account_id=f"SP{i}", ts=f"2026-10-{day}T09:00:00", amount=25.0))
+    s.commit()
+    hold, _, reason = screening.screen(s, "SP2")
+    assert hold is True and "different addresses" in reason
+
+
+def test_evaluation_is_deterministic_and_honest():
+    from app.evaluation import run_eval
+    r = run_eval(5)
+    assert r == run_eval(5)
+    att = {a["name"]: a for a in r["attacks"]}
+    assert att["Same device, buying within minutes"]["blocked_pct"] == 100
+    slow = att["Same device, spread over days"]
+    assert slow["blocked_pct"] > slow["before_spread_rule_pct"]
+    assert att["Rotating devices, shared address only (blind spot)"]["blocked_pct"] == 0   # reported, not hidden
+    assert all(i["groups_affected_pct"] == 0 for i in r["innocent"])
+
+
+def test_eval_endpoint_is_public_and_capped():
+    with TestClient(app) as c:
+        r = c.get("/api/eval", params={"seeds": 999}).json()
+        assert r["trials_per_scenario"] == 40 and r["summary"]["avg_innocent_groups_disrupted_pct"] == 0

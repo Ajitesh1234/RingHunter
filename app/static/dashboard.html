@@ -28,7 +28,10 @@ table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt
 <main><section><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div></section>
-<section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div></section></main>
+<section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
+<div class="card"><h2>Self-test: we attack our own detector</h2>
+<p class="mu" style="margin-top:0">Replays synthetic rings and innocent look-alikes through the same hold rule the live checkout uses.</p>
+<button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div></section></main>
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -83,6 +86,14 @@ async function loadOrders(){const O=await api('/api/orders'),sum=s=>O.filter(o=>
  $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
  document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
   twoStep(b,cap?'Click again to capture':'Click again to void',async()=>{try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})})}
+async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Running...</p>';
+ try{const r=await api('/api/eval?seeds=20');
+ const bar=(n,v,c,x)=>`<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px;gap:8px"><span>${esc(n)}</span><b>${v}%${x||''}</b></div><div style="height:8px;background:var(--bd);border-radius:4px"><div style="height:8px;width:${v}%;background:${c};border-radius:4px"></div></div></div>`;
+ o.innerHTML=`<p><b>${r.summary.avg_followup_buyers_blocked_pct}%</b> of follow-up ring buyers blocked &nbsp;|&nbsp; <b>${r.summary.avg_innocent_groups_disrupted_pct}%</b> of innocent groups disrupted</p><b>Attacks (higher is better)</b>`
+ +r.attacks.map(a=>bar(a.name,a.blocked_pct,'var(--ok)',a.blocked_pct!==a.before_spread_rule_pct?` <span class="mu" style="font-weight:400">(was ${a.before_spread_rule_pct}% before the device-spread rule)</span>`:'')).join('')
+ +'<b>Innocent look-alikes (lower is better)</b>'+r.innocent.map(i=>bar(i.name,i.groups_affected_pct,'var(--bad)')).join('')
+ +`<p class="mu" style="font-size:12px">${esc(r.note)} ${r.trials_per_scenario} trials per scenario.</p>`}catch(e){o.textContent=e.message}}
+$('#runeval').onclick=runEval;
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};
