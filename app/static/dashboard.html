@@ -24,6 +24,7 @@ table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt
 <input id="tok" type="password" placeholder="Admin token" size="14" autocomplete="off">
 <button id="seed">Load demo data</button><button class="d" id="reset">Reset demo</button><button class="p" id="detect">Run detection</button></header>
 <div id="tiles" class="tiles"></div>
+<div id="status" style="max-width:1400px;margin:8px auto 0;padding:0 20px;min-height:20px;font-size:13px"></div>
 <main><section><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div></section>
@@ -39,10 +40,10 @@ $('#tok').value=sessionStorage.tok||'';$('#tok').oninput=e=>sessionStorage.tok=e
 function twoStep(b,text,run){/* in-page confirm: first click arms the button, second click runs it (browser pop-ups can be blocked) */
  if(b.dataset.armed){clearTimeout(b.t);delete b.dataset.armed;b.textContent=b.dataset.label;run();return}
  b.dataset.armed=1;b.dataset.label=b.textContent;b.textContent=text;b.t=setTimeout(()=>{delete b.dataset.armed;b.textContent=b.dataset.label},4000)}
-function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t.h);t.h=setTimeout(()=>t.style.display='none',7000)}
+function toast(m){const st=$('#status');if(st)st.textContent=String(m).slice(0,400);const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t.h);t.h=setTimeout(()=>t.style.display='none',7000)}
 async function api(path,method='GET',body){const h={'Content-Type':'application/json'};if(sessionStorage.tok)h['X-Admin-Token']=sessionStorage.tok;
  const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({}));
- if(!r.ok)throw new Error(r.status===401?'Admin token required or wrong':(j.detail||r.status));return j}
+ if(!r.ok){const d=j.detail;throw new Error(r.status===401?'Admin token missing or wrong. Retype it in the header box (401).':(typeof d==='string'?d:JSON.stringify(d||{http_status:r.status})))}return j}
 const split=c=>{const s=new Set();c.edges.forEach(e=>{if(e.shared_attributes.some(a=>STRONG.includes(a)))e.pair.forEach(m=>s.add(m))});return s};
 function mount(el,id,cols,rows,onSel){const box=$(id);
  if(window.agGrid){if(el.g){el.g.setGridOption('rowData',rows);return el.g}
