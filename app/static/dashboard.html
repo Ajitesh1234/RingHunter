@@ -15,7 +15,7 @@ input,button{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid va
 button{cursor:pointer}button.p{background:var(--ac);color:#fff;border-color:var(--ac)}button.d{border-color:var(--bad);color:var(--bad)}button:disabled{opacity:.5;cursor:default}
 .ag-theme-quartz,.ag-theme-quartz-dark{height:230px;width:100%}.pill{padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--bd)}
 .mu{color:var(--mu)}ul{margin:4px 0 10px;padding-left:18px}.rec{border:1px solid var(--bd);border-radius:8px;padding:10px;margin:8px 0}
-#toast{position:fixed;bottom:16px;right:16px;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;display:none;white-space:pre-wrap;font-size:12px}
+#toast{position:fixed;top:78px;right:16px;z-index:50;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;display:none;white-space:pre-wrap;font-size:12px}
 table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt th{border-bottom:1px solid var(--bd);padding:5px;text-align:left}
 .tiles{display:flex;gap:12px;flex-wrap:wrap;padding:16px 20px 0;max-width:1400px;margin:auto}.tile{flex:1;min-width:160px;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px}.tile b{font-size:22px;display:block}
 </style></head><body>
@@ -36,6 +36,9 @@ const dark=matchMedia('(prefers-color-scheme: dark)');
 function theme(){document.querySelectorAll('#gc,#gd').forEach(e=>e.className=dark.matches?'ag-theme-quartz-dark':'ag-theme-quartz')}
 theme();dark.onchange=theme;
 $('#tok').value=sessionStorage.tok||'';$('#tok').oninput=e=>sessionStorage.tok=e.target.value;
+function twoStep(b,text,run){/* in-page confirm: first click arms the button, second click runs it (browser pop-ups can be blocked) */
+ if(b.dataset.armed){clearTimeout(b.t);delete b.dataset.armed;b.textContent=b.dataset.label;run();return}
+ b.dataset.armed=1;b.dataset.label=b.textContent;b.textContent=text;b.t=setTimeout(()=>{delete b.dataset.armed;b.textContent=b.dataset.label},4000)}
 function toast(m){const t=$('#toast');t.textContent=m;t.style.display='block';clearTimeout(t.h);t.h=setTimeout(()=>t.style.display='none',7000)}
 async function api(path,method='GET',body){const h={'Content-Type':'application/json'};if(sessionStorage.tok)h['X-Admin-Token']=sessionStorage.tok;
  const r=await fetch(path,{method,headers:h,body:body?JSON.stringify(body):undefined});const j=await r.json().catch(()=>({}));
@@ -70,19 +73,17 @@ function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.s
   f.recommendations.map((r,i)=>`<div class="rec"><b>${esc(r.action.replace(/_/g,' '))}</b> <span class="mu">${esc(r.account_ids.join(', '))}</span><br>${esc(r.reason)}<br>
    <button class="${r.action==='refund_transactions'?'d':'p'}" data-i="${i}" ${(c.done||[]).includes(i)?'disabled':''}>${(c.done||[]).includes(i)?'Done':(r.action==='request_more_info'?'Mark as noted':'Approve')}</button></div>`).join('')}
  $('#detail').innerHTML=h;const b=$('#inv');if(b)b.onclick=async()=>{b.disabled=true;b.textContent='Analyzing...';try{await api('/api/cases/'+c.id+'/investigate','POST');await load();show(CASES.find(x=>x.id===c.id))}catch(e){toast(e.message);b.disabled=false}};
- document.querySelectorAll('.rec button').forEach(b=>b.onclick=async()=>{const r=f.recommendations[b.dataset.i];
-  if(!confirm('Approve: '+r.action+' for '+r.account_ids.join(', ')+'?\nThis can move sandbox money.'))return;
-  try{const x=await api('/api/cases/'+c.id+'/approve','POST',{recommendation_index:+b.dataset.i});toast(JSON.stringify(x,null,1));await load();show(CASES.find(y=>y.id===c.id))}catch(e){toast(e.message)}})}
+ document.querySelectorAll('.rec button').forEach(b=>b.onclick=()=>{
+  twoStep(b,'Click again to confirm',async()=>{try{const x=await api('/api/cases/'+c.id+'/approve','POST',{recommendation_index:+b.dataset.i});toast(JSON.stringify(x,null,1));await load();show(CASES.find(y=>y.id===c.id))}catch(e){toast(e.message)}})})}
 const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><span class="mu" style="font-size:12px">${c}</span></div>`;
 async function loadOrders(){const O=await api('/api/orders'),sum=s=>O.filter(o=>o.status===s).reduce((a,o)=>a+o.amount,0).toFixed(2);
  $('#tiles').innerHTML=tile('Prevented','$'+sum('voided'),'voided before any money moved')+tile('Pending review','$'+sum('pending_review'),'authorized, awaiting your decision')+tile('Captured','$'+sum('captured'),'charged normally');
  const P=O.filter(o=>o.status==='pending_review');
  $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
- document.querySelectorAll('#pend button').forEach(b=>b.onclick=async()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
-  if(!confirm((cap?'Capture (charge) ':'Void (release the hold on) ')+'this order?'))return;
-  try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})}
+ document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
+  twoStep(b,cap?'Click again to capture':'Click again to void',async()=>{try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})})}
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
-$('#reset').onclick=async()=>{if(!confirm('Wipe accounts, transactions and cases on this server? Disputes are kept.'))return;try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(e){toast(e.message)}};
+$('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};
 load().catch(e=>toast(e.message));
 </script></body></html>
