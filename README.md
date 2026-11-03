@@ -74,6 +74,7 @@ flowchart LR
 - **Nothing moves without approval.** State-changing endpoints require an admin token, are idempotent, and every action is logged. Account identifiers are sticky (first-seen device, IP and address are kept), so a returning buyer cannot shake ring links by switching browser.
 
 ## Testing instructions for judges
+- **No login needed:** open `/dashboard#watch`, pick a scenario and press **Replay**. It walks an attack (or an innocent group) through the live hold rule purchase by purchase, in plain language. Then **Run evaluation** for the measured results.
 - Open `/dashboard`. Reading is public; actions need the **admin token** given in the Devpost testing-instructions field (sandbox only).
 - Click **Run evaluation** to see the self-test. Click **Load demo data** for a ready-made ring, then **Investigate with AI analyst**.
 - To make a live ring, buy at `/?device=ring1` with sandbox buyers (credentials in the Devpost field). The first buyer is charged; later buyers on the same device are held and appear under **Orders held for review**. Try **Void** and **Capture**.

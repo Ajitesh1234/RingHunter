@@ -56,6 +56,8 @@ def health():
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
 STORE = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Demo Store</title>
 <body style="font-family:system-ui;max-width:420px;margin:40px auto"><h2>Demo Store (PayPal sandbox)</h2>
+<p style="font-size:13px;line-height:1.7">RingHunter stops coordinated buyer rings at checkout, before money moves.<br>
+<a href="/dashboard#watch">Watch an attack get stopped (no login)</a> · <a href="/dashboard">Merchant dashboard</a> · <a href="/docs">API</a> · <a href="https://github.com/Ajitesh1234/RingHunter">Code</a></p>
 <p>Sandbox Widget — $25.00</p><button id=b style="padding:12px 20px;font-size:16px">Pay with PayPal</button>
 <p id=m></p><script>
 let d=new URLSearchParams(location.search).get('device')||localStorage.dev||(localStorage.dev='dev_'+crypto.randomUUID().slice(0,12));
@@ -129,6 +131,14 @@ def _upsert_account(s, pid, email, dev, ip, shipping):
 def run_evaluation(seeds: int = 20):
     """Attacks our own screening with synthetic rings and innocent look-alikes. Read-only, in memory, no PayPal calls."""
     return evaluation.run_eval(seeds)
+
+
+@app.get("/api/replay")
+def replay(i: int | None = None):
+    """No-login walkthrough: one synthetic scenario, purchase by purchase. Read-only, in memory."""
+    if i is None:
+        return {"scenarios": evaluation.scenario_names()}
+    return evaluation.replay_story(i)
 
 
 def _screened_checkout(s, request, token, dev):

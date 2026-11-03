@@ -351,3 +351,16 @@ def test_orders_report_which_captured_payments_were_refunded():
     with TestClient(app) as c:
         o = {x["id"]: x for x in c.get("/api/orders").json()}
         assert o["ORF"]["refunded"] is True and o["OKEEP"]["refunded"] is False
+
+
+def test_replay_walkthrough_is_public_deterministic_and_plain():
+    with TestClient(app) as c:
+        names = c.get("/api/replay").json()["scenarios"]
+        assert len(names) == 10 and names[0].startswith("ATTACK") and names[-1].startswith("INNOCENT")
+        a = c.get("/api/replay", params={"i": 0}).json()
+        assert a == c.get("/api/replay", params={"i": 0}).json()
+        assert a["steps"][0]["decision"] == "charged" and a["held"] >= 3 and a["prevented_usd"] == 25.0 * a["held"]
+        assert all(s["reason"] for s in a["steps"] if s["decision"] == "held")
+        for i in range(5, 10):   # every innocent scenario: nobody held
+            assert c.get("/api/replay", params={"i": i}).json()["held"] == 0
+        assert "Watch an attack" in c.get("/dashboard").text and "no login" in c.get("/").text

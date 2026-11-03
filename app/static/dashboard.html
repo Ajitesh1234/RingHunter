@@ -29,6 +29,9 @@ table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div></section>
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
+<div class="card" id="watch"><h2>Watch an attack get stopped <span class="mu" style="font-weight:400;font-size:12px">(no login needed)</span></h2>
+<p class="mu" style="margin-top:0">Pick a scenario and replay it purchase by purchase through the live hold rule. Synthetic data, no PayPal calls.</p>
+<select id="rs" style="max-width:100%"></select> <button class="p" id="rp">Replay</button><div id="rout" style="margin-top:10px"></div></div>
 <div class="card"><h2>Self-test: we attack our own detector</h2>
 <p class="mu" style="margin-top:0">Replays synthetic rings and innocent look-alikes through the same hold rule the live checkout uses.</p>
 <button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div></section></main>
@@ -94,6 +97,13 @@ async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Runnin
  +'<b>Innocent look-alikes (lower is better)</b>'+r.innocent.map(i=>bar(i.name,i.groups_affected_pct,'var(--bad)')).join('')
  +`<p class="mu" style="font-size:12px">${esc(r.note)} ${r.trials_per_scenario} trials per scenario.</p>`}catch(e){o.textContent=e.message}}
 $('#runeval').onclick=runEval;
+api('/api/replay').then(r=>{$('#rs').innerHTML=r.scenarios.map((n,i)=>`<option value="${i}">${esc(n)}</option>`).join('')}).catch(()=>{});
+$('#rp').onclick=async()=>{const o=$('#rout');o.innerHTML='';try{const r=await api('/api/replay?i='+$('#rs').value);
+ o.innerHTML=`<p><b>${esc(r.title)}</b> <span class="pill">${r.kind}</span></p><table class="pt"><tr><th></th><th>Device</th><th>Address</th><th>When</th><th>Decision</th></tr></table><div id="rsum"></div>`;
+ const tb=o.querySelector('table');
+ for(const s of r.steps){await new Promise(x=>setTimeout(x,650));
+  const held=s.decision==='held';tb.insertAdjacentHTML('beforeend',`<tr><td>${esc(s.buyer)}</td><td>${esc(s.device)}</td><td>${esc(s.address)}</td><td>${esc(s.when)}</td><td><span class="pill" style="border-color:${held?'var(--bad)':'var(--ok)'};color:${held?'var(--bad)':'var(--ok)'}">${held?'HELD, not charged':'Charged'}</span>${s.reason?'<br><span class="mu" style="font-size:12px">'+esc(s.reason)+'</span>':''}</td></tr>`)}
+ $('#rsum').innerHTML=r.kind==='attack'?`<p><b>$${r.prevented_usd.toFixed(2)}</b> never left the buyers. The first buyer is always charged, because nothing links them yet.</p>`:`<p><b>No honest buyer was held.</b></p>`}catch(e){o.textContent=e.message}};
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

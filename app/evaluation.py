@@ -4,7 +4,7 @@ after each purchase it runs detection and HOLDS the buyer only if they share a d
 import random
 from datetime import datetime, timedelta
 from . import detection_core as core
-from .investigator import split_members
+from .investigator import split_members, STRONG
 from .screening import spread_rule
 
 T0 = datetime(2026, 11, 2, 10, 0, 0)
@@ -45,24 +45,66 @@ def _purchases(spec, n, rng, label):
     return out
 
 
-def replay(purchases, use_spread=True):
-    """Which purchases would live screening hold? (the first buyer of a ring can never be caught: nothing links them yet)"""
-    accounts, txns, held = {}, {}, []
+def _replay(purchases, use_spread=True):
+    """Replays purchases in time order and records, for each one, whether live screening would hold it and why."""
+    accounts, txns, out = {}, {}, []
     for p in purchases:
         accounts[p["id"]] = {"device_id": p["device"], "card_fp": f"none_card_{p['id']}", "ip": p["ip"],
                              "shipping_address": p["addr"]}
         txns[p["id"]] = [{"timestamp": p["ts"].isoformat(timespec="seconds"), "amount": PRICE}]
         trail, _ = core.run_detection(accounts, txns)
-        hold = False
+        hold, reason = False, None
         for e in trail:
             if e["decision"] != "NOT_FLAGGED" and e["cluster_size"] >= 2 and p["id"] in e["cluster_members"]:
                 if p["id"] in split_members(e)[0]:
+                    mine = [ed for ed in e["edges"] if p["id"] in ed["pair"] and STRONG & set(ed["shared_attributes"])]
+                    attrs = sorted({x for ed in mine for x in ed["shared_attributes"] if x in STRONG})
+                    partners = {m for ed in mine for m in ed["pair"] if m != p["id"]}
                     hold = True
+                    reason = f"shares {' and '.join(a.replace('_id', '').replace('_fp', '') for a in attrs)} with {len(partners)} earlier buyer(s) in a flagged ring"
         if use_spread and not hold:
             group = [a for a in accounts.values() if a["device_id"] == p["device"]]
-            hold = spread_rule([a["shipping_address"] for a in group])
-        held.append(hold)
-    return held
+            if spread_rule([a["shipping_address"] for a in group]):
+                hold = True
+                reason = f"one device used by {len(group)} accounts shipping to {len({a['shipping_address'] for a in group})} different addresses"
+        out.append({"hold": hold, "reason": reason})
+    return out
+
+
+def replay(purchases, use_spread=True):
+    """Which purchases would live screening hold? (the first buyer of a ring can never be caught: nothing links them yet)"""
+    return [r["hold"] for r in _replay(purchases, use_spread)]
+
+
+SCENARIOS = [(s, "attack") for s in ATTACKS] + [(s, "innocent") for s in INNOCENT]
+
+
+def scenario_names():
+    return [("ATTACK: " if k == "attack" else "INNOCENT: ") + s[0] for s, k in SCENARIOS]
+
+
+def replay_story(i: int) -> dict:
+    """One scenario, purchase by purchase, in plain language, for the no-login walkthrough."""
+    i = max(0, min(int(i), len(SCENARIOS) - 1))
+    spec, kind = SCENARIOS[i]
+    rng = random.Random(777 + i)
+    ps = _purchases(spec, 5 if kind == "attack" else 3, rng, f"story{i}")
+    res = _replay(ps)
+    names = {"device": {}, "addr": {}, "ip": {}}
+    def lab(field, prefix, value, letters):
+        m = names[field]
+        if value not in m:
+            m[value] = prefix + (chr(65 + len(m)) if letters else str(len(m) + 1))
+        return m[value]
+    steps = []
+    for k, (p, r) in enumerate(zip(ps, res)):
+        mins = (p["ts"] - ps[0]["ts"]).total_seconds() / 60
+        when = "start" if k == 0 else (f"+{round(mins)} min" if mins < 180 else f"+{round(mins / 60)} h")
+        steps.append({"buyer": f"Buyer {k + 1}", "device": lab("device", "Device ", p["device"], True),
+                      "address": lab("addr", "Address ", p["addr"], False), "ip": lab("ip", "IP ", p["ip"], False),
+                      "when": when, "decision": "held" if r["hold"] else "charged", "reason": r["reason"]})
+    held = sum(1 for s in steps if s["decision"] == "held")
+    return {"index": i, "title": spec[0], "kind": kind, "steps": steps, "held": held, "prevented_usd": held * PRICE}
 
 
 def run_eval(seeds: int = 20) -> dict:
