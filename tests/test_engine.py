@@ -364,3 +364,46 @@ def test_replay_walkthrough_is_public_deterministic_and_plain():
         for i in range(5, 10):   # every innocent scenario: nobody held
             assert c.get("/api/replay", params={"i": i}).json()["held"] == 0
         assert "Watch an attack" in c.get("/dashboard").text and "no login" in c.get("/").text
+
+
+def test_chain_scenario_is_a_real_alternating_chain():
+    import random
+    from app.evaluation import _purchases, ATTACKS
+    spec = [s for s in ATTACKS if s[0].startswith("Chain")][0]
+    ps = _purchases(spec, 5, random.Random(1), "c")
+    dev = [p["device"] for p in ps]
+    adr = [p["addr"] for p in ps]
+    assert dev[0] == dev[1] and dev[2] == dev[3] and dev[1] != dev[2]      # devices pair up (0,1) (2,3)
+    assert adr[1] == adr[2] and adr[3] == adr[4] and adr[0] != adr[1]      # addresses pair neighbours (1,2) (3,4)
+
+
+def test_redteam_scores_model_attacks_and_drops_invalid_ones(monkeypatch):
+    import json as _j
+    from app import llm, redteam
+    good = lambda n, **kw: {"name": n, "ring_size": 5, "device": "shared", "address": "unique", "ip": "unique",
+                            "gap_unit": "m", "gap_low": 1, "gap_high": 4, "rationale": "r", **kw}
+    payload = {"attacks": [good("Burst on one device"), good("Slow drip", gap_unit="h", gap_low=20, gap_high=30),
+                           good("Fully unique", device="unique"), good("Invalid size", ring_size=99), good("Bad mode", device="teleport")]}
+    monkeypatch.setattr(llm, "provider", lambda: "groq")
+    monkeypatch.setattr(llm, "model_name", lambda: "fake-model")
+    monkeypatch.setattr(llm, "complete", lambda s, u, m=0, json_mode=False: _j.dumps(payload) if json_mode else "Commentary.")
+    redteam._state.update(last=None, ts=0.0)
+    r = redteam.run_live()
+    assert r["source"] == "fake-model" and [s["name"] for s in r["strategies"]] == ["Burst on one device", "Slow drip", "Fully unique"]
+    st = {s["name"]: s for s in r["strategies"]}
+    assert st["Burst on one device"]["status"] == "caught" and st["Fully unique"]["status"] == "evaded"
+    assert r["commentary"] == "Commentary." and r["evaded"] == 1
+
+
+def test_redteam_falls_back_to_offline_sample_and_is_rate_limited(monkeypatch):
+    from app import llm, redteam
+    monkeypatch.setattr(llm, "provider", lambda: "groq")
+    def boom(*a, **k): raise RuntimeError("rate limited")
+    monkeypatch.setattr(llm, "complete", boom)
+    redteam._state.update(last=None, ts=0.0)
+    with TestClient(app) as c:
+        r = c.post("/api/redteam").json()
+        assert r["source"] == "offline sample" and len(r["strategies"]) == 6 and "failed" in r["note"]
+        assert any(s["status"] == "evaded" for s in r["strategies"])        # we do not hide what gets through
+        assert c.post("/api/redteam").status_code == 429                     # cooldown protects the free-tier quota
+        assert c.get("/api/redteam").json()["source"] == "offline sample"

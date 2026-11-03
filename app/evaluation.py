@@ -28,10 +28,14 @@ INNOCENT = [
 
 
 def _value(mode, tag, i):
+    """shared: everyone; unique: nobody; pairs: (0,1),(2,3),...;
+    chain: devices pair up (0,1),(2,3),... while addresses pair the neighbours (1,2),(3,4),... so the ring is linked end to end."""
     if mode == "shared":
         return f"{tag}-shared"
+    if mode == "pairs":
+        return f"{tag}-{i // 2}"
     if mode == "chain":
-        return f"{tag}-{i // 2}" if tag == "dev" else f"{tag}-{(i + 1) // 2}"
+        return f"{tag}-{i // 2}" if tag.endswith("-dev") else f"{tag}-{(i + 1) // 2}"
     return f"{tag}-{i}"
 
 

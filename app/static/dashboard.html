@@ -34,7 +34,10 @@ table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt
 <select id="rs" style="max-width:100%"></select> <button class="p" id="rp">Replay</button><div id="rout" style="margin-top:10px"></div></div>
 <div class="card"><h2>Self-test: we attack our own detector</h2>
 <p class="mu" style="margin-top:0">Replays synthetic rings and innocent look-alikes through the same hold rule the live checkout uses.</p>
-<button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div></section></main>
+<button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div>
+<div class="card" id="redteam"><h2>AI red team: a model invents attacks against our detector</h2>
+<p class="mu" style="margin-top:0">We do not write these attacks. A separate model proposes evasion strategies; we replay each one against the live hold rule and report what got through.</p>
+<button class="p" id="rtbtn">Let an AI try to break it</button><div id="rtout" style="margin-top:10px"></div></div></section></main>
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -104,6 +107,15 @@ $('#rp').onclick=async()=>{const o=$('#rout');o.innerHTML='';try{const r=await a
  for(const s of r.steps){await new Promise(x=>setTimeout(x,650));
   const held=s.decision==='held';tb.insertAdjacentHTML('beforeend',`<tr><td>${esc(s.buyer)}</td><td>${esc(s.device)}</td><td>${esc(s.address)}</td><td>${esc(s.when)}</td><td><span class="pill" style="border-color:${held?'var(--bad)':'var(--ok)'};color:${held?'var(--bad)':'var(--ok)'}">${held?'HELD, not charged':'Charged'}</span>${s.reason?'<br><span class="mu" style="font-size:12px">'+esc(s.reason)+'</span>':''}</td></tr>`)}
  $('#rsum').innerHTML=r.kind==='attack'?`<p><b>$${r.prevented_usd.toFixed(2)}</b> never left the buyers. The first buyer is always charged, because nothing links them yet.</p>`:`<p><b>No honest buyer was held.</b></p>`}catch(e){o.textContent=e.message}};
+function showRT(r){const col={caught:'var(--ok)',partly:'var(--warn)',evaded:'var(--bad)'},word={caught:'caught',partly:'partly caught',evaded:'EVADED'};
+ $('#rtout').innerHTML=`<p class="mu" style="font-size:12px">${esc(r.note)}</p>`+r.strategies.map(s=>`<div style="margin:9px 0"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><b>${esc(s.name)}</b><span style="color:${col[s.status]};font-weight:600">${s.blocked_pct}% blocked, ${word[s.status]}</span></div>
+ <div style="height:8px;background:var(--bd);border-radius:4px;margin:3px 0"><div style="height:8px;width:${s.blocked_pct}%;background:${col[s.status]};border-radius:4px"></div></div>
+ <div class="mu" style="font-size:12px">${esc(s.rationale)}<br>device: ${esc(s.device)} | address: ${esc(s.address)} | ip: ${esc(s.ip)} | ${s.ring_size} accounts | ${esc(s.gap)} apart</div></div>`).join('')
+ +`<p><b>${r.evaded}</b> of ${r.strategies.length} strategies evaded the detector.</p>`+(r.commentary?`<p class="mu" style="font-size:13px"><b>AI commentary:</b> ${esc(r.commentary)}</p>`:'')}
+api('/api/redteam').then(showRT).catch(()=>{});
+$('#rtbtn').onclick=async()=>{const o=$('#rtbtn');o.disabled=true;o.textContent='The model is designing attacks...';
+ try{showRT(await api('/api/redteam','POST'))}catch(e){toast(e.message)}o.disabled=false;o.textContent='Let an AI try to break it again'};
+$('#rs').onchange=()=>{$('#rout').innerHTML=''};
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

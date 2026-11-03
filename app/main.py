@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation
+from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, now
 
@@ -139,6 +139,20 @@ def replay(i: int | None = None):
     if i is None:
         return {"scenarios": evaluation.scenario_names()}
     return evaluation.replay_story(i)
+
+
+@app.get("/api/redteam")
+def redteam_last():
+    return redteam.last_or_sample()
+
+
+@app.post("/api/redteam")
+def redteam_run():
+    """A model invents evasion strategies; we replay them against the live hold rule. Public, rate-limited, read-only."""
+    try:
+        return redteam.run_live()
+    except redteam.Cooldown as c:
+        raise HTTPException(429, f"The red team is cooling down. Try again in {c.wait}s.")
 
 
 def _screened_checkout(s, request, token, dev):

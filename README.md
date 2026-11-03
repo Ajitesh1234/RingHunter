@@ -26,14 +26,19 @@ The dashboard has a **Self-test** button (and `GET /api/eval`). It generates syn
 | Same device, buying within minutes | 100% |
 | Same device + shared address, within minutes | 100% |
 | Same device, spread over days | 66% (was 0% before we added the device-spread rule) |
-| Chain: neighbours share a device or address | 44% |
+| Chain: neighbours share a device or address | 56% |
 | Rotating devices, shared address only | 0% (known blind spot; address alone is deliberately too weak to hold anyone) |
 
 | Innocent look-alike | Groups with a wrongly held order |
 |---|---|
 | Strangers; office (shared IP); family (shared address); roommates; family tablet (one device, one address, days apart) | 0% in all five |
 
+(A bug in our first version of the chain scenario made it measure the wrong thing; it was found, fixed and re-run, which moved that row from 44% to 56%.)
+
 The evaluation exposed that a ring which slows down evaded the timing signal. We added one rule (a device used by 3+ accounts that ship to 3+ different addresses is held for review), and the table shows the before and after. **These are our own synthetic scenarios, not real traffic. The first buyer in a ring can never be blocked, because nothing links them yet.**
+
+## AI red team: attacks we did not write
+A self-test written by the same author as the detector is circular, so the dashboard also has an **AI red team**. A separate model (the same Groq model, prompted only as an adversary) is told what the detector can observe (device, address, IP, purchase times) and asked to invent six evasion strategies. Its output is validated against a fixed schema (bounded sizes, allowed modes only), each strategy is replayed against the live hold rule, and the dashboard reports what got through, with a short AI commentary on which extra signal might catch it. The model never touches checkout, the database or PayPal. With no key, or if the call fails, an offline sample set (written by us, and labelled as such) is shown instead. In our offline sample, 3 of 6 strategies evade the detector (for example, rotating devices with no other link), and we show that rather than hide it.
 
 ## Architecture
 ```mermaid
@@ -62,6 +67,7 @@ flowchart LR
 
 ## How the AI is used
 - **Investigator agent:** a tool-calling loop over `openai/gpt-oss-120b` (Groq, OpenAI-compatible API). Tools return account details and transactions for accounts in the case only.
+- **Red team:** a model invents evasion strategies from a schema; we replay them against the detector (see above).
 - **Evidence drafting:** the model writes a short factual dispute note from the merchant's own records, and is told never to invent shipping, tracking or policy claims.
 - **Safe by construction:** model output is untrusted.
   - It is validated against a schema.
