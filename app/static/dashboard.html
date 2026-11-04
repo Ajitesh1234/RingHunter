@@ -90,7 +90,7 @@ function graph(c){const m=c.cluster.cluster_members,core=split(c.cluster),n=m.le
 function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.status);
  let h=`<h2>Case ${c.id} <span class="pill">${esc(c.status)}</span> <span class="pill">${esc(c.decision.replace('FLAGGED_FOR_',''))} ${c.score}</span></h2>`+graph(c);
  if(!f)h+=`<p><button class="p" id="inv" ${closed?'disabled':''}>Investigate with AI analyst</button></p>`;
- else{h+=`<p>${esc(f.summary)}</p><p class="mu">Analyst: ${esc(f.analyst)} | confidence: ${esc(f.confidence)}${f.fallback_reason?' | fallback: '+esc(f.fallback_reason):''}</p>
+ else{h+=`<p>${esc(f.summary)}</p><p class="mu">Analyst: ${esc(f.analyst)} | confidence: ${esc(f.confidence)}${f.tools_used&&f.tools_used.length?' | tools: '+esc(f.tools_used.join(', ')):''}${f.fallback_reason?' | fallback: '+esc(f.fallback_reason):''}</p>
   <b>Evidence</b><ul>${f.key_evidence.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Caveats</b><ul>${f.caveats.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Recommended actions (need your approval)</b>`+
   f.recommendations.map((r,i)=>`<div class="rec"><b>${esc(r.action.replace(/_/g,' '))}</b> <span class="mu">${esc(r.account_ids.join(', '))}</span><br>${esc(r.reason)}<br>
    <button class="${r.action==='refund_transactions'?'d':'p'}" data-i="${i}" ${(c.done||[]).includes(i)?'disabled':''}>${(c.done||[]).includes(i)?'Done':(r.action==='request_more_info'?'Mark as noted':'Approve')}</button></div>`).join('')}

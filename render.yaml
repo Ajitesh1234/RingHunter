@@ -9,7 +9,7 @@ services:
     name: ringhunter
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && pip install --no-deps paypal-agent-toolkit==1.11.0
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:

@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select
-from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam
+from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, now
 
@@ -51,7 +51,7 @@ def dashboard():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider(), "admin_protected": bool(settings.admin_token), "screening": settings.screening}
+    return {"ok": True, "paypal_sandbox": paypal.enabled(), "ai": llm.provider(), "admin_protected": bool(settings.admin_token), "screening": settings.screening, "agent_toolkit": paypal_tools.toolkit_installed()}
 
 
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------

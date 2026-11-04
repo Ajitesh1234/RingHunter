@@ -440,3 +440,74 @@ def test_redteam_daily_cap_protects_quota(monkeypatch):
     redteam._state.update(last=None, ts=0.0, day=today, runs=redteam.DAILY_CAP)
     r = redteam.run_live()
     assert "Daily live-run limit" in r["note"] and r["strategies"]
+
+
+def _case_with_dispute(prefix):
+    from app.db import SessionLocal, Account, Dispute, Order, init_db
+    init_db()
+    s = SessionLocal()
+    for i in (1, 2):
+        s.merge(Account(id=f"{prefix}{i}", device_id=f"{prefix}dev", ip=f"5.5.5.{i}", shipping_address=f"{i} lane"))
+    s.merge(Dispute(id=f"PP-R-{prefix}", account_id=f"{prefix}1", reason="MERCHANDISE_OR_SERVICE_NOT_RECEIVED",
+                    status="WAITING_FOR_SELLER_RESPONSE", amount=25.0, raw_json="{}", evidence_submitted=0))
+    s.merge(Order(id=f"ORDER{prefix}", account_id=f"{prefix}2", amount=25.0, ts="2026-11-04T10:00:00", status="captured"))
+    s.commit()
+    return s, {f"{prefix}1", f"{prefix}2"}
+
+
+def test_analyst_paypal_tools_are_scoped_to_the_case_and_report_their_path(monkeypatch):
+    from app import investigator, paypal_tools
+    s, members = _case_with_dispute("TKA")
+    monkeypatch.setattr(paypal_tools, "get_dispute", lambda d: ({"status": "WAITING_FOR_SELLER_RESPONSE", "reason": "X",
+                         "dispute_amount": {"value": "25.00"}, "messages": [1], "evidences": [1, 2]}, "PayPal Agent Toolkit"))
+    monkeypatch.setattr(paypal_tools, "get_order", lambda o: ({"id": o, "status": "COMPLETED", "amount": "25.00"}, "REST"))
+    used = []
+    r = investigator._tool(s, members, "get_paypal_dispute", {"dispute_id": "PP-R-TKA"}, used)
+    assert r["via"] == "PayPal Agent Toolkit" and r["evidences"] == 2 and r["amount"] == "25.00"
+    assert investigator._tool(s, members, "get_paypal_dispute", {"dispute_id": "PP-R-NOPE"}, used)["error"]
+    assert investigator._tool(s, {"someone-else"}, "get_paypal_dispute", {"dispute_id": "PP-R-TKA"}, used)["error"]   # not this case
+    o = investigator._tool(s, members, "get_paypal_order", {"order_id": "ORDERTKA"}, used)
+    assert o["status"] == "COMPLETED" and o["via"] == "REST"
+    assert used == ["get_paypal_dispute (PayPal Agent Toolkit)", "get_paypal_order (REST)"]
+
+
+def test_toolkit_falls_back_to_rest_when_missing_or_failing(monkeypatch):
+    from app import paypal, paypal_tools
+    monkeypatch.setattr(paypal, "get_dispute", lambda d: {"status": "RESOLVED"})
+    monkeypatch.setattr(paypal_tools, "_state", {"api": None, "tried": True})
+    assert paypal_tools.get_dispute("PP-R-1") == ({"status": "RESOLVED"}, "REST")
+    class Boom:
+        def run(self, method, params): raise RuntimeError("boom")
+    monkeypatch.setattr(paypal_tools, "_state", {"api": Boom(), "tried": True})
+    assert paypal_tools.get_dispute("PP-R-1")[1] == "REST"
+    class Ok:
+        def run(self, method, params): return '{"status": "OPEN", "echo": "%s"}' % method
+    monkeypatch.setattr(paypal_tools, "_state", {"api": Ok(), "tried": True})
+    data, via = paypal_tools.get_dispute("PP-R-1")
+    assert via == "PayPal Agent Toolkit" and data["echo"] == "get_dispute"
+    assert paypal_tools.get_order("OID123456789012345")[0]["echo"] == "get_order_details"
+
+
+def test_case_file_lists_tools_used_and_always_shows_linked_disputes(monkeypatch):
+    from app import investigator, llm, paypal_tools
+    s, members = _case_with_dispute("TKB")
+    monkeypatch.setattr(paypal_tools, "get_dispute", lambda d: ({"status": "OPEN", "reason": "X", "dispute_amount": {"value": "25.00"}}, "PayPal Agent Toolkit"))
+    entry = {"cluster_members": sorted(members), "cluster_size": 2, "shared_attribute_types": ["device_id"],
+             "decision": "FLAGGED_FOR_HUMAN_REVIEW", "suspicion_score": 0.7, "time_synchronization_score": 1,
+             "edges": [{"pair": sorted(members), "shared_attributes": ["device_id"]}]}
+    answer = {"summary": "s", "confidence": "medium", "key_evidence": ["e"], "caveats": [],
+              "recommendations": [{"action": "request_more_info", "account_ids": sorted(members), "reason": "r"}]}
+    def fake_agent(system, user, tools, tool_fn, **kw):
+        assert {"get_paypal_dispute", "get_paypal_order"} <= {t["name"] for t in tools}
+        tool_fn("get_paypal_dispute", {"dispute_id": "PP-R-TKB"})
+        import json as _j
+        return _j.dumps(answer)
+    monkeypatch.setattr(llm, "provider", lambda: "groq")
+    monkeypatch.setattr(llm, "model_name", lambda: "fake-model")
+    monkeypatch.setattr(llm, "run_agent", fake_agent)
+    cf, who = investigator.investigate(s, entry)
+    assert who == "fake-model" and cf.tools_used == ["get_paypal_dispute (PayPal Agent Toolkit)"]
+    assert any("PayPal dispute" in line and "TKB1" in line for line in cf.key_evidence)
+    monkeypatch.setattr(llm, "provider", lambda: "offline")                       # offline analyst shows the dispute too
+    cf2, _ = investigator.investigate(s, entry)
+    assert any("PayPal dispute" in line for line in cf2.key_evidence) and cf2.tools_used == []

@@ -8,3 +8,4 @@ python-dotenv
 anthropic
 pytest
 psycopg[binary]
+requests

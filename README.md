@@ -65,7 +65,7 @@ flowchart LR
 - **Webhooks:** `verify-webhook-signature` on every event; payment and dispute events are stored.
 - **Disputes v1:** get dispute, provide evidence, send message.
 
-We call PayPal's REST APIs directly. We evaluated PayPal's Agent Toolkit and MCP server; to our reading of their documentation, their tools cover creating, getting and paying orders, disputes (list, get, accept claim), invoices, shipments and subscriptions, and not the authorization void and capture, signature-verified webhook and dispute-evidence calls that RingHunter depends on, so direct REST was the better fit.
+Money-moving calls (authorize, capture, void, refund, dispute evidence) use our own guarded REST client. The **PayPal Agent Toolkit** (v1.11.0, its framework-free core installed with `--no-deps`, without the LangChain and CrewAI extras) powers the AI analyst's read-only lookups of live disputes and orders, restricted to accounts in the case. Its tool list (create, get and pay orders; disputes list, get and accept; invoices; shipments; subscriptions) has no authorization void or capture and no dispute-evidence call, which is why those stay on REST. If the toolkit is not installed or a call fails, the same lookup uses REST, and the case file lists which tools were used and through which path.
 
 ## How the AI is used
 - **Investigator agent:** a tool-calling loop over `openai/gpt-oss-120b` (Groq, OpenAI-compatible API). Tools return account details and transactions for accounts in the case only.
