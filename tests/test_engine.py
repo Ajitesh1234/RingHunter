@@ -407,3 +407,36 @@ def test_redteam_falls_back_to_offline_sample_and_is_rate_limited(monkeypatch):
         assert any(s["status"] == "evaded" for s in r["strategies"])        # we do not hide what gets through
         assert c.post("/api/redteam").status_code == 429                     # cooldown protects the free-tier quota
         assert c.get("/api/redteam").json()["source"] == "offline sample"
+
+
+def test_activity_timeline_lists_flags_orders_and_approvals():
+    with TestClient(app) as c:
+        c.post("/api/demo/seed")
+        cid = c.get("/api/cases").json()[0]["id"]
+        c.post(f"/api/cases/{cid}/investigate")
+        c.post(f"/api/cases/{cid}/approve", json={"recommendation_index": 0})
+        ev = c.get("/api/activity").json()
+        kinds = {e["kind"] for e in ev}
+        assert {"case", "action"} <= kinds and any("Merchant approved" in e["text"] for e in ev)
+        assert [e["when"] for e in ev] == sorted((e["when"] for e in ev), reverse=True)
+
+
+def test_store_and_result_pages_keep_their_contract():
+    with TestClient(app) as c:
+        home = c.get("/").text
+        assert "Pay with PayPal" in home and "/checkout/create" in home and "device" in home and "no login" in home
+        assert "Merchant view" in c.get("/dashboard").text and "Activity" in c.get("/dashboard").text
+    from app.main import _result_page
+    assert "payment received" in _result_page("ok", "Thanks, payment received.")
+    assert "Order declined." in _result_page("no", "Order declined.")
+
+
+def test_redteam_daily_cap_protects_quota(monkeypatch):
+    from datetime import datetime, timezone
+    from app import llm, redteam
+    monkeypatch.setattr(llm, "provider", lambda: "groq")
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call the model")))
+    today = datetime.now(timezone.utc).date().isoformat()
+    redteam._state.update(last=None, ts=0.0, day=today, runs=redteam.DAILY_CAP)
+    r = redteam.run_live()
+    assert "Daily live-run limit" in r["note"] and r["strategies"]

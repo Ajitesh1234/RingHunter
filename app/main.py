@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import secrets
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -54,16 +55,55 @@ def health():
 
 
 # ---------- storefront (demo checkout that captures the signals PayPal does not expose) ----------
-STORE = """<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><title>Demo Store</title>
-<body style="font-family:system-ui;max-width:420px;margin:40px auto"><h2>Demo Store (PayPal sandbox)</h2>
-<p style="font-size:13px;line-height:1.7">RingHunter stops coordinated buyer rings at checkout, before money moves.<br>
-<a href="/dashboard#watch">Watch an attack get stopped (no login)</a> · <a href="/dashboard">Merchant dashboard</a> · <a href="/docs">API</a> · <a href="https://github.com/Ajitesh1234/RingHunter">Code</a></p>
-<p>Sandbox Widget — $25.00</p><button id=b style="padding:12px 20px;font-size:16px">Pay with PayPal</button>
-<p id=m></p><script>
+ICON = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='29' "
+        "fill='%230b5fff'/%3E%3Ccircle cx='32' cy='32' r='11' fill='none' stroke='white' stroke-width='5'/%3E%3C/svg%3E")
+BASE_CSS = """:root{--bg:#f6f7f9;--card:#fff;--tx:#14181f;--mu:#66707f;--bd:#dde1e7;--ac:#0b5fff;--ok:#188038;--bad:#d93025;--warn:#e8a200}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1318;--card:#171c23;--tx:#e8ecf2;--mu:#98a2b3;--bd:#2a323d;--ac:#6ea1ff;--ok:#4cc27a;--bad:#ff6b5e;--warn:#f2b83d}}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+.mu{color:var(--mu);font-size:14px}"""
+STORE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Demo Store | RingHunter</title><link rel="icon" href="__ICON__"><style>__CSS__
+nav{display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:14px 22px;border-bottom:1px solid var(--bd);background:var(--card);font-size:14px}
+nav b{font-size:18px;margin-right:auto}nav a{color:var(--ac);text-decoration:none}nav a:hover{text-decoration:underline}
+main{max-width:920px;margin:30px auto;padding:0 18px;display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:760px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.prod{display:flex;flex-direction:column;gap:12px}
+.art{height:150px;border-radius:10px;background:linear-gradient(135deg,var(--ac),#7c4dff);display:flex;align-items:center;justify-content:center;font-size:58px;color:#fff}
+h1{font-size:22px;margin:0}h2{font-size:18px;margin:0 0 6px}.price{font-size:28px;font-weight:700}
+button{font:inherit;font-size:17px;padding:13px 18px;border:0;border-radius:10px;background:#ffc439;color:#111;font-weight:700;cursor:pointer}
+button:hover{filter:brightness(.96)}button:disabled{opacity:.6;cursor:default}
+.steps{list-style:none;margin:12px 0 0;padding:0;counter-reset:s}.steps li{counter-increment:s;position:relative;padding:0 0 14px 40px}
+.steps li:before{content:counter(s);position:absolute;left:0;top:0;width:27px;height:27px;border-radius:50%;background:var(--ac);color:var(--bg);text-align:center;line-height:27px;font-size:14px;font-weight:700}
+</style></head><body>
+<nav><b>Demo Store</b><a href="/dashboard#watch">Watch an attack get stopped (no login)</a><a href="/dashboard">Merchant dashboard</a><a href="/docs">API</a><a href="https://github.com/Ajitesh1234/RingHunter">Code</a></nav>
+<main>
+<section class="card prod"><div class="art" aria-hidden="true">&#9881;</div><h1>Sandbox Widget</h1>
+<div class="mu">A test product for the PayPal sandbox. Pay with a sandbox buyer account; no real money moves.</div>
+<div class="price">$25.00</div><button id="b">Pay with PayPal</button><div id="m" class="mu"></div></section>
+<section class="card"><h2>What happens at checkout</h2>
+<ol class="steps"><li><b>You approve the payment.</b><br><span class="mu">PayPal reserves the money. Nothing is charged yet.</span></li>
+<li><b>RingHunter checks the order.</b><br><span class="mu">It looks for links to a ring of accounts: shared devices, addresses and timing.</span></li>
+<li><b>Clean orders are charged.</b><br><span class="mu">Linked orders are held for the merchant, and no money moves.</span></li></ol>
+<p class="mu">RingHunter stops coordinated buyer rings at checkout, before money moves.</p></section>
+</main>
+<script>
 let d=new URLSearchParams(location.search).get('device')||localStorage.dev||(localStorage.dev='dev_'+crypto.randomUUID().slice(0,12));
-b.onclick=async()=>{const r=await fetch('/checkout/create',{method:'POST',headers:{'Content-Type':'application/json'},
+b.onclick=async()=>{b.disabled=true;b.textContent='Opening PayPal...';const r=await fetch('/checkout/create',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({amount:'25.00',device_id:d})});const j=await r.json();
-if(j.approve_url)location=j.approve_url;else m.textContent=JSON.stringify(j)}</script>"""
+if(j.approve_url)location=j.approve_url;else{m.textContent=JSON.stringify(j);b.disabled=false;b.textContent='Pay with PayPal'}}</script></body></html>""".replace("__ICON__", ICON).replace("__CSS__", BASE_CSS)
+
+
+def _result_page(kind, headline, detail=""):
+    """Plain, readable result page for the buyer after PayPal returns them to the store."""
+    color = {"ok": "var(--ok)", "hold": "var(--warn)", "no": "var(--bad)"}[kind]
+    mark = {"ok": "&#10003;", "hold": "&#8987;", "no": "&#10005;"}[kind]
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>Demo Store</title><link rel="icon" href="{ICON}"><style>{BASE_CSS}'
+            f'.box{{max-width:460px;margin:12vh auto;background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:30px;text-align:center}}'
+            f'.m{{width:54px;height:54px;border-radius:50%;margin:0 auto 14px;background:{color};color:#fff;font-size:28px;line-height:54px}}'
+            f'a{{color:var(--ac)}}</style></head><body><div class="box"><div class="m">{mark}</div><h2>{headline}</h2>'
+            f'<p class="mu">{detail}</p><p><a href="/">Back to the store</a> &middot; <a href="/dashboard">Merchant dashboard</a></p></div></body></html>')
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -90,7 +130,7 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     order = paypal.get_order(token)
     pre_pid = order.get("payer", {}).get("payer_id")
     if pre_pid and s.get(Blocked, pre_pid):
-        return "<h3>Order declined.</h3>"  # never captured, so no money moves
+        return _result_page("no", "Order declined.", "This order could not be completed. You have not been charged.")
     if settings.screening:
         return _screened_checkout(s, request, token, dev)
     cap = paypal.capture_order(token)
@@ -103,14 +143,14 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     if s.get(Blocked, pid):
         # NOTE: capture already happened above; auto-refund keeps the merchant whole.
         paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")
-        return "<h3>Order declined.</h3>"
+        return _result_page("no", "Order declined.", "This order could not be completed. You have not been charged.")
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     _upsert_account(s, pid, payer.get("email_address"), dev, ip, shipping)
     s.merge(Txn(id=c["id"], account_id=pid, ts=now().replace(tzinfo=None).isoformat(timespec="seconds"),
                 amount=float(c["amount"]["value"]), capture_id=c["id"]))
     s.commit()
     eng.detect(s)
-    return "<h3>Thanks, payment received.</h3>"
+    return _result_page("ok", "Thanks, payment received.", "Your order is confirmed.")
 
 
 def _upsert_account(s, pid, email, dev, ip, shipping):
@@ -125,6 +165,26 @@ def _upsert_account(s, pid, email, dev, ip, shipping):
     else:
         s.add(Account(id=pid, email=email, device_id=dev or None, ip=ip, shipping_address=shipping))
         s.flush()
+
+
+@app.get("/api/activity")
+def activity(s=Depends(db)):
+    """Recent events for the dashboard timeline: cases flagged, orders and their outcomes, merchant approvals."""
+    def naive(x):
+        d = x if isinstance(x, datetime) else datetime.fromisoformat(x)
+        return d.replace(tzinfo=None) if d.tzinfo is None else d.astimezone(timezone.utc).replace(tzinfo=None)
+    refunded = {x.id for x in s.scalars(select(Txn).where(Txn.refunded == 1))}
+    ev = []
+    for c in s.scalars(select(Case).where(Case.status != "superseded")):
+        ev.append((naive(c.created_at), "case", f"Case {c.id} flagged: {c.decision.replace('FLAGGED_FOR_', '').replace('_', ' ').lower()}, score {c.score}"))
+    for o in s.scalars(select(Order)):
+        what = {"pending_review": "held for review", "voided": "voided, no money moved", "authorized": "authorized",
+                "captured": "charged, then refunded" if o.capture_id in refunded else "charged"}.get(o.status, o.status)
+        ev.append((naive(o.ts), "order", f"Order ${o.amount:.2f} {what}"))
+    for a in s.scalars(select(ActionLog)):
+        ev.append((naive(a.ts), "action", f"Merchant approved: {a.action.replace('_', ' ')} (case {a.case_id})"))
+    ev.sort(key=lambda e: e[0], reverse=True)
+    return [{"when": e[0].isoformat(timespec="minutes"), "kind": e[1], "text": e[2]} for e in ev[:15]]
 
 
 @app.get("/api/eval")
@@ -176,11 +236,11 @@ def _screened_checkout(s, request, token, dev):
     if hold:
         o.status, o.reason, o.case_id = "pending_review", reason, case_id
         s.commit()
-        return "<h3>Thanks. Your order is being reviewed. You have not been charged yet.</h3>"
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.")
     screening.capture_order(s, o)
     s.commit()
     eng.detect(s)
-    return "<h3>Thanks, payment received.</h3>"
+    return _result_page("ok", "Thanks, payment received.", "Your order is confirmed.")
 
 
 # ---------- orders held for review ----------

@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<!doctype html><html lang="en"><head><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='29' fill='%230b5fff'/%3E%3Ccircle cx='32' cy='32' r='11' fill='none' stroke='white' stroke-width='5'/%3E%3C/svg%3E"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>RingHunter</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
@@ -12,23 +12,35 @@ h1{font-size:18px;margin:0;flex:1}h2{font-size:15px;margin:0 0 8px}main{display:
 @media(max-width:900px){main{grid-template-columns:1fr}}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin-bottom:16px}
 input,button{font:inherit;padding:6px 10px;border-radius:6px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
-button{cursor:pointer}button.p{background:var(--ac);color:#fff;border-color:var(--ac)}button.d{border-color:var(--bad);color:var(--bad)}button:disabled{opacity:.5;cursor:default}
+button{cursor:pointer}button.p{background:var(--ac);color:var(--bg);border-color:var(--ac);font-weight:600}button.d{border-color:var(--bad);color:var(--bad)}button:disabled{opacity:.5;cursor:default}
 .ag-theme-quartz,.ag-theme-quartz-dark{height:230px;width:100%}.pill{padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--bd)}
 .mu{color:var(--mu)}ul{margin:4px 0 10px;padding-left:18px}.rec{border:1px solid var(--bd);border-radius:8px;padding:10px;margin:8px 0}
 #toast{position:fixed;top:78px;right:16px;z-index:50;max-width:420px;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;display:none;white-space:pre-wrap;font-size:12px}
 table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt th{border-bottom:1px solid var(--bd);padding:5px;text-align:left}
 .tiles{display:flex;gap:12px;flex-wrap:wrap;padding:16px 20px 0;max-width:1400px;margin:auto}.tile{flex:1;min-width:160px;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px 14px}.tile b{font-size:22px;display:block}
+.sec{margin:2px 0 8px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu)}
+.card{box-shadow:0 1px 3px rgba(0,0,0,.06)}button:hover:not(:disabled){filter:brightness(1.08)}
+.tile:first-child b{color:var(--ok)}
+.hero{max-width:1400px;margin:14px auto 0;padding:0 20px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}
+.hero .step{border:1px solid var(--bd);background:var(--card);border-radius:99px;padding:3px 12px}
+.hero a{color:var(--ac);margin-left:auto;text-decoration:none;font-weight:600}
+.tl{position:relative;margin:0;padding:0;list-style:none}.tl li{display:flex;gap:10px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--bd);font-size:13px}
+.tl i{width:9px;height:9px;border-radius:50%;flex:none;background:var(--ac)}.tl i.case{background:var(--warn)}.tl i.action{background:var(--ok)}
+select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
 </style></head><body>
 <header><h1>RingHunter <span class="mu" style="font-weight:400">fraud ring analyst for PayPal merchants</span></h1>
 <span id="health" class="pill">...</span>
 <input id="tok" type="password" placeholder="Admin token" size="14" autocomplete="off">
 <button id="seed">Load demo data</button><button class="d" id="reset">Reset demo</button><button class="p" id="detect">Run detection</button></header>
+<div class="hero"><span class="step">1 Authorize</span><span>&rarr;</span><span class="step">2 Screen for rings</span><span>&rarr;</span><span class="step">3 Charge, or hold with no money moved</span><a href="#watch">Watch an attack get stopped &darr;</a></div>
 <div id="tiles" class="tiles"></div>
 <div id="status" style="max-width:1400px;margin:8px auto 0;padding:0 20px;min-height:20px;font-size:13px"></div>
-<main><section><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
+<main><section><div class="sec">Merchant view</div><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
-<div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div></section>
+<div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div>
+<div class="card"><h2>Activity</h2><ul id="act" class="tl"></ul></div></section>
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
+<div class="sec">Proof it works</div>
 <div class="card" id="watch"><h2>Watch an attack get stopped <span class="mu" style="font-weight:400;font-size:12px">(no login needed)</span></h2>
 <p class="mu" style="margin-top:0">Pick a scenario and replay it purchase by purchase through the live hold rule. Synthetic data, no PayPal calls.</p>
 <select id="rs" style="max-width:100%"></select> <button class="p" id="rp">Replay</button><div id="rout" style="margin-top:10px"></div></div>
@@ -37,7 +49,7 @@ table.pt{width:100%;border-collapse:collapse;font-size:13px}table.pt td,table.pt
 <button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div>
 <div class="card" id="redteam"><h2>AI red team: a model invents attacks against our detector</h2>
 <p class="mu" style="margin-top:0">We do not write these attacks. A separate model proposes evasion strategies; we replay each one against the live hold rule and report what got through.</p>
-<button class="p" id="rtbtn">Let an AI try to break it</button><div id="rtout" style="margin-top:10px"></div></div></section></main>
+<button class="p" id="rtbtn">Let an AI try to break it</button> <span id="rtmsg" class="mu"></span><div id="rtout" style="margin-top:10px"></div></div></section></main>
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -62,7 +74,7 @@ function mount(el,id,cols,rows,onSel){const box=$(id);
   rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
  box.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>onSel&&onSel(rows[tr.dataset.i]));return el}
 const gC={},gD={};
-async function load(){loadOrders().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
+async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
  CASES=await api('/api/cases');const D=await api('/api/disputes');
  mount(gC,'#gc',[{field:'id',headerName:'ID',maxWidth:70},{field:'status',headerName:'Status'},
   {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
@@ -114,8 +126,10 @@ function showRT(r){const col={caught:'var(--ok)',partly:'var(--warn)',evaded:'va
  +`<p><b>${r.evaded}</b> of ${r.strategies.length} strategies evaded the detector.</p>`+(r.commentary?`<p class="mu" style="font-size:13px"><b>AI commentary:</b> ${esc(r.commentary)}</p>`:'')}
 api('/api/redteam').then(showRT).catch(()=>{});
 $('#rtbtn').onclick=async()=>{const o=$('#rtbtn');o.disabled=true;o.textContent='The model is designing attacks...';
- try{showRT(await api('/api/redteam','POST'))}catch(e){toast(e.message)}o.disabled=false;o.textContent='Let an AI try to break it again'};
+ $('#rtmsg').textContent='';try{showRT(await api('/api/redteam','POST'))}catch(e){$('#rtmsg').textContent=e.message}o.disabled=false;o.textContent='Let an AI try to break it again'};
 $('#rs').onchange=()=>{$('#rout').innerHTML=''};
+async function loadActivity(){const A=await api('/api/activity');
+ $('#act').innerHTML=A.length?A.map(e=>`<li><i class="${e.kind}"></i><span class="mu" style="flex:none">${esc(e.when.slice(5,16).replace('T',' '))}</span><span>${esc(e.text)}</span></li>`).join(''):'<li class="mu">Nothing yet.</li>'}
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

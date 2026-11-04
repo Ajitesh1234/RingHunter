@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from . import llm
 from .evaluation import _purchases, replay, PRICE
 
-COOLDOWN = 30  # seconds between live model runs (protects the free-tier quota)
-_state = {"last": None, "ts": 0.0}
+COOLDOWN = 90    # seconds between live model runs (protects the free-tier quota)
+DAILY_CAP = 40   # live model runs per UTC day; after that the most recent result is shown
+_state = {"last": None, "ts": 0.0, "day": None, "runs": 0}
 
 
 class Cooldown(Exception):
@@ -125,10 +126,17 @@ def run_live():
     wait = COOLDOWN - (time.time() - _state["ts"])
     if wait > 0:
         raise Cooldown(int(wait) + 1)
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _state["day"] != today:
+        _state.update(day=today, runs=0)
+    if _state["runs"] >= DAILY_CAP:
+        base = _state["last"] or sample()
+        return {**base, "note": "Daily live-run limit reached, to protect the free model quota. Showing the most recent run."}
     _state["ts"] = time.time()
     if llm.provider() == "offline":
         res = sample("No LLM key on this server, so this is the offline sample.")
     else:
+        _state["runs"] += 1
         try:
             specs = _ask_model()
             if len(specs) < 3:
