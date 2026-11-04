@@ -65,6 +65,8 @@ flowchart LR
 - **Webhooks:** `verify-webhook-signature` on every event; payment and dispute events are stored.
 - **Disputes v1:** get dispute, provide evidence, send message.
 
+We call PayPal's REST APIs directly. We evaluated PayPal's Agent Toolkit and MCP server; to our reading of their documentation, their tools cover creating, getting and paying orders, disputes (list, get, accept claim), invoices, shipments and subscriptions, and not the authorization void and capture, signature-verified webhook and dispute-evidence calls that RingHunter depends on, so direct REST was the better fit.
+
 ## How the AI is used
 - **Investigator agent:** a tool-calling loop over `openai/gpt-oss-120b` (Groq, OpenAI-compatible API). Tools return account details and transactions for accounts in the case only.
 - **Red team:** a model invents evasion strategies from a schema; we replay them against the detector (see above).
