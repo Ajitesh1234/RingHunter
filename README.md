@@ -11,9 +11,9 @@ Small merchants lose money to rings of accounts that share devices and addresses
 
 ## What it does
 1. **Authorize first.** The demo checkout uses PayPal Orders v2 with `intent=AUTHORIZE`: the buyer's funds are reserved, nothing is charged yet. It also records the device and IP that PayPal does not expose.
-2. **Screen before capture.** The buyer is linked to existing accounts in a graph. If they share a **device or card** with a flagged ring, the order is **held for review**. Otherwise it is captured automatically. Holding costs the merchant nothing: no money has moved.
+2. **Screen before capture.** The buyer is linked to existing accounts in a graph. If they share a **device** (or a card fingerprint, where the merchant has one) with a flagged ring, the order is **held for review**. Otherwise it is captured automatically. Holding costs the merchant nothing: no money has moved.
 3. **Merchant decides.** Held orders appear on the dashboard with the reason. **Capture** charges the buyer; **Void** releases the hold. Voided money never left the buyer.
-4. **Strong versus weak evidence.** Accounts sharing a device or card are **core**. Accounts linked *only by address or IP* are **peripheral** and are never held or refunded, so families and offices are left alone.
+4. **Strong versus weak evidence.** Accounts sharing a device (or card fingerprint) are **core**. Accounts linked *only by address or IP* are **peripheral** and are never held or refunded, so families and offices are left alone.
 5. **AI analyst.** For a flagged case, a tool-using model inspects accounts and writes a structured finding: evidence, caveats, recommended actions (hold accounts, refund payments).
 6. **Approve to act.** Hold accounts and refund payments (real PayPal refunds) only after approval. Held buyers are blocked *before* capture on later orders.
 7. **Disputes connected.** Verified PayPal dispute webhooks are stored and linked to the buyer, show whether they belong to a ring, and the merchant can send evidence to PayPal after approval.
@@ -104,12 +104,37 @@ Without any keys, detection and the offline analyst still run. Set `ADMIN_TOKEN`
 Python, FastAPI, SQLAlchemy (SQLite locally, Postgres on Render), networkx, PayPal REST APIs, Groq (`openai/gpt-oss-120b`), AG Grid Community (dashboard tables), Render (hosting). Tests: pytest.
 
 ## Prior work disclosure
+See [HACKATHON_CHANGES.md](HACKATHON_CHANGES.md) for exactly what existed before the hackathon and what was built during it.
+
 `app/detection_core.py` (the graph scoring engine) comes from the author's earlier project, **Abuse-Ring Sentinel**, and is reused as is. Everything else was written for this hackathon: the PayPal integration, authorize-screen-capture checkout, webhooks, dispute handling, the device-spread rule, the AI investigator and its guardrails, the approval, refund, void and hold flows, the held-buyer block, the admin lock, the dashboard, the self-test and the tests.
+
+## Security and payment-integrity notes
+- **The server sets the price.** The browser cannot change the amount (`PRODUCT_PRICE`, default 25.00).
+- **A returning order must match a checkout this store started.** Each checkout is recorded when created. On return we require the PayPal order to be `APPROVED` with the same amount and currency; anything else is declined before authorize or capture. A checkout is processed once: reloads, replayed links and double clicks report the outcome and change nothing. The device ID comes from the stored checkout, not from a URL parameter.
+- **State changes are atomic and idempotent.** An order moves out of `pending_review` with a conditional update, so two simultaneous requests cannot both act. PayPal calls carry `PayPal-Request-Id`. If PayPal rejects a capture or void, the order goes back to its previous state so the merchant can retry.
+- **The admin lock fails closed.** On Render (or with `REQUIRE_ADMIN=1`), state-changing endpoints return 503 unless `ADMIN_TOKEN` is set. Locally the lock is open for development.
+- **Read-only views are public by design,** so judges can inspect the system. The data is sandbox-only with fake buyers; production would put these behind authentication.
+- **The device ID is client-supplied** (a browser value; `?device=` in the demo). An attacker can change it, which is why production needs real device fingerprinting and why the red team reports what evades us.
+
+## Deploy configuration
+Set these environment variables (see `.env.example`). Secrets are never committed.
+
+| Variable | Purpose |
+|---|---|
+| `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET` | PayPal sandbox app credentials |
+| `PAYPAL_WEBHOOK_ID` | webhook ID, so events are signature-verified |
+| `BASE_URL` | public URL PayPal redirects buyers back to |
+| `DATABASE_URL` | Postgres URL (SQLite locally) |
+| `SCREENING` | `on` = authorize, screen, then capture or hold (the deployed demo uses `on`) |
+| `ADMIN_TOKEN` | locks state-changing endpoints; required on Render |
+| `PRODUCT_PRICE` | server-side price (default `25.00`) |
+| `GROQ_API_KEY`, `GROQ_MODEL` | AI analyst and red team (without a key, the offline analyst runs) |
+| `STRICT_ORDER_CHECK` | `on` (default) enforces the order checks above |
 
 ## Limitations (honest)
 - Detection is heuristic scoring, not proof of fraud. A patient adversary who rotates devices and addresses can evade it (see the blind spot above).
 - The first buyer in a ring is always charged; the system protects against the follow-up buyers.
-- PayPal does not give merchants device or card fingerprints, so the demo checkout captures device and IP itself. The device ID comes from the browser (or `?device=` in the demo), which an attacker can change. Production would need real device fingerprinting.
+- Live linking uses device, address, IP and purchase timing. PayPal gives merchants no card fingerprint or account-creation time, so those signals exist only in synthetic tests; we removed a fake signup-time signal rather than keep it. PayPal does not give merchants device fingerprints either, so the demo checkout captures device and IP itself. The device ID comes from the browser (or `?device=` in the demo), which an attacker can change. Production would need real device fingerprinting.
 - Self-test results come from our own synthetic scenarios.
 - Sandbox data is synthetic, and all sandbox buyers share PayPal's default shipping address. That is why address-only links are treated as weak evidence.
 - Evidence notes only claim shipping when the merchant supplies real tracking.

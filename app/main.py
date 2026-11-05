@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from datetime import datetime, timezone
 import secrets
 from pathlib import Path
@@ -8,10 +9,10 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Security
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools
 from .config import settings
-from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, now
+from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, now
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -36,7 +37,9 @@ _admin_header = APIKeyHeader(name="X-Admin-Token", auto_error=False)
 def require_admin(token: str | None = Security(_admin_header)):
     """Guards every endpoint that changes state or spends money. Empty ADMIN_TOKEN = open (local dev only)."""
     if not settings.admin_token:
-        return
+        if settings.admin_required:
+            raise HTTPException(503, "ADMIN_TOKEN is not configured on this server, so state-changing endpoints are disabled.")
+        return  # local development only
     if not token or not secrets.compare_digest(token, settings.admin_token):
         raise HTTPException(401, "admin token required")
 
@@ -90,7 +93,7 @@ button:hover{filter:brightness(.96)}button:disabled{opacity:.6;cursor:default}
 <script>
 let d=new URLSearchParams(location.search).get('device')||localStorage.dev||(localStorage.dev='dev_'+crypto.randomUUID().slice(0,12));
 b.onclick=async()=>{b.disabled=true;b.textContent='Opening PayPal...';const r=await fetch('/checkout/create',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({amount:'25.00',device_id:d})});const j=await r.json();
+body:JSON.stringify({device_id:d})});const j=await r.json();
 if(j.approve_url)location=j.approve_url;else{m.textContent=JSON.stringify(j);b.disabled=false;b.textContent='Pay with PayPal'}}</script></body></html>""".replace("__ICON__", ICON).replace("__CSS__", BASE_CSS)
 
 
@@ -112,25 +115,67 @@ def store():
 
 
 class CreateIn(BaseModel):
-    amount: str = "25.00"
-    device_id: str
+    device_id: str = ""
+    amount: str | None = None  # accepted for compatibility but ignored: the server decides the price
 
 
 @app.post("/checkout/create")
-def checkout_create(body: CreateIn, request: Request):
+def checkout_create(body: CreateIn, request: Request, s=Depends(db)):
     if not paypal.enabled():
         raise HTTPException(503, "PayPal sandbox credentials not configured")
-    o = paypal.create_order(body.amount, "USD", f"{settings.base_url}/checkout/return?dev={body.device_id}",
+    o = paypal.create_order(settings.product_price, settings.currency, f"{settings.base_url}/checkout/return",
                             f"{settings.base_url}/", intent="AUTHORIZE" if settings.screening else "CAPTURE")
+    s.merge(Checkout(id=o["id"], device=(body.device_id[:80] or None), amount=settings.product_price,
+                     currency=settings.currency, status="created", ts=now().replace(tzinfo=None).isoformat(timespec="seconds")))
+    s.commit()
     return o
+
+
+def _order_problem(order, ck):
+    """Does the PayPal order match the checkout we started? Returns a reason string if not."""
+    if not settings.strict_order_check:
+        return None
+    pu = (order.get("purchase_units") or [{}])[0]
+    amt = pu.get("amount") or {}
+    if order.get("status") != "APPROVED":
+        return f"order status is {order.get('status')}, expected APPROVED"
+    try:
+        same = Decimal(str(amt.get("value"))) == Decimal(ck.amount)
+    except Exception:
+        same = False
+    if not same or amt.get("currency_code") != ck.currency:
+        return "amount or currency does not match the checkout that was started"
+    return None
+
+
+def _already_processed(s, token):
+    o = s.get(Order, token)
+    if o and o.status == "captured":
+        return _result_page("ok", "Thanks, payment received.", "This order was already processed.")
+    if o and o.status == "pending_review":
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "This order was already processed.")
+    return _result_page("no", "This order was already processed.", "Nothing further was done.")
 
 
 @app.get("/checkout/return", response_class=HTMLResponse)
 def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
+    ck = s.get(Checkout, token)
+    if not ck:
+        return _result_page("no", "Order not recognised.", "This checkout was not started from this store. You have not been charged.")
+    if ck.status != "created":
+        return _already_processed(s, token)          # reload, replayed link or double click: report, change nothing
     order = paypal.get_order(token)
+    problem = _order_problem(order, ck)
     pre_pid = order.get("payer", {}).get("payer_id")
-    if pre_pid and s.get(Blocked, pre_pid):
+    if problem or (pre_pid and s.get(Blocked, pre_pid)):
+        ck.status = "rejected"
+        s.commit()
         return _result_page("no", "Order declined.", "This order could not be completed. You have not been charged.")
+    claimed = s.execute(update(Checkout).where(Checkout.id == token, Checkout.status == "created").values(status="used"))
+    s.commit()
+    if claimed.rowcount != 1:                        # another request got here first
+        return _already_processed(s, token)
+    dev = ck.device or ""                            # the device we recorded at checkout start, not a URL parameter
     if settings.screening:
         return _screened_checkout(s, request, token, dev)
     cap = paypal.capture_order(token)
@@ -141,8 +186,7 @@ def checkout_return(token: str, request: Request, dev: str = "", s=Depends(db)):
     addr = pu.get("shipping", {}).get("address", {})
     shipping = "|".join(str(addr.get(k, "")).lower().strip() for k in ("address_line_1", "postal_code", "country_code")) or None
     if s.get(Blocked, pid):
-        # NOTE: capture already happened above; auto-refund keeps the merchant whole.
-        paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")
+        paypal.refund_capture(c["id"], request_id=f"blocked-{c['id']}")   # safety net only: the check above runs before capture
         return _result_page("no", "Order declined.", "This order could not be completed. You have not been charged.")
     ip = (request.headers.get("x-forwarded-for") or request.client.host).split(",")[0].strip()
     _upsert_account(s, pid, payer.get("email_address"), dev, ip, shipping)
@@ -260,16 +304,30 @@ def _order(s, oid) -> Order:
     return o
 
 
+def _claim(s, oid, from_statuses, to_status):
+    """Atomic state transition: only one request can move an order out of its current state."""
+    res = s.execute(update(Order).where(Order.id == oid, Order.status.in_(from_statuses)).values(status=to_status))
+    s.commit()
+    return res.rowcount == 1
+
+
 @app.post("/api/orders/{oid}/capture", dependencies=[ADMIN])
 def order_capture(oid: str, s=Depends(db)):
     o = _order(s, oid)
-    if o.status == "captured":
-        return {"idempotent_replay": True, "status": o.status}
-    if o.status == "voided":
+    prev = o.status
+    if prev == "captured":
+        return {"idempotent_replay": True, "status": prev}
+    if prev == "voided":
         raise HTTPException(409, "order was voided")
+    if not _claim(s, oid, ("pending_review", "authorized"), "capturing"):
+        raise HTTPException(409, "order is already being processed")
+    o = s.get(Order, oid)
+    s.refresh(o)
     try:
         screening.capture_order(s, o)
     except paypal.PayPalError as e:
+        o.status = prev                               # nothing moved: put it back so the merchant can retry
+        s.commit()
         raise HTTPException(502, f"PayPal rejected the capture: {e}")
     s.commit()
     eng.detect(s)
@@ -279,13 +337,20 @@ def order_capture(oid: str, s=Depends(db)):
 @app.post("/api/orders/{oid}/void", dependencies=[ADMIN])
 def order_void(oid: str, s=Depends(db)):
     o = _order(s, oid)
-    if o.status == "voided":
-        return {"idempotent_replay": True, "status": o.status}
-    if o.status == "captured":
+    prev = o.status
+    if prev == "voided":
+        return {"idempotent_replay": True, "status": prev}
+    if prev == "captured":
         raise HTTPException(409, "order already captured; use refund instead")
+    if not _claim(s, oid, ("pending_review", "authorized"), "voiding"):
+        raise HTTPException(409, "order is already being processed")
+    o = s.get(Order, oid)
+    s.refresh(o)
     try:
         screening.void_order(s, o)
     except paypal.PayPalError as e:
+        o.status = prev
+        s.commit()
         raise HTTPException(502, f"PayPal rejected the void: {e}")
     s.commit()
     return {"status": o.status}

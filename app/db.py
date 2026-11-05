@@ -78,6 +78,16 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class Checkout(Base):  # one row per checkout WE started: binds a returning PayPal order to what we asked for
+    __tablename__ = "checkouts"
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal order id we created
+    device: Mapped[str | None] = mapped_column(String, nullable=True)
+    amount: Mapped[str] = mapped_column(String)
+    currency: Mapped[str] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, default="created")  # created | used | rejected
+    ts: Mapped[str] = mapped_column(String)
+
+
 class Order(Base):  # screened checkout: authorized first, captured or voided after review
     __tablename__ = "orders"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal order id

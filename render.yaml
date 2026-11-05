@@ -19,6 +19,10 @@ services:
         fromDatabase:
           name: ringhunter-db
           property: connectionString
+      - key: SCREENING
+        value: "on"
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
       - key: BASE_URL
         sync: false
       - key: PAYPAL_CLIENT_ID

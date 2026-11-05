@@ -258,46 +258,126 @@ def test_order_capture_and_void_are_idempotent_and_exclusive(monkeypatch):
         assert c.post("/api/orders/OV2/capture").status_code == 409
 
 
-def test_screened_checkout_end_to_end_with_mocked_paypal(monkeypatch):
+def _paypal_env(monkeypatch, payers, amount="25.00", status="APPROVED", authorize=None):
+    """Mocks PayPal for the checkout flow. payers maps a PayPal order id to (payer id, address number)."""
     from app import paypal
     from app.config import settings
     monkeypatch.setattr(settings, "screening", True, raising=False)
-    def mk(pid, n):
+    monkeypatch.setattr(paypal, "enabled", lambda: True)
+    tokens, calls = iter(list(payers)), {"create": [], "authorize": []}
+    def create(amount_, currency, ret, cancel, intent="CAPTURE"):
+        calls["create"].append((amount_, currency, intent))
+        return {"id": next(tokens), "approve_url": "https://pay.example/approve"}
+    def get_order(t):
+        return {"status": status, "payer": {"payer_id": payers[t][0]},
+                "purchase_units": [{"amount": {"value": amount, "currency_code": "USD"}}]}
+    def authorize_order(t):
+        calls["authorize"].append(t)
+        pid, n = payers[t]
         return {"payer": {"payer_id": pid, "email_address": f"{pid}@x.test"},
                 "purchase_units": [{"shipping": {"address": {"address_line_1": f"{n} elm st", "postal_code": str(n), "country_code": "US"}},
-                                    "payments": {"authorizations": [{"id": f"AUTH-{pid}", "amount": {"value": "25.00", "currency_code": "USD"}}]}}]}
-    payers = {"TOK-E1": "E1", "TOK-E2": "E2"}
-    monkeypatch.setattr(paypal, "get_order", lambda t: {"payer": {"payer_id": payers[t]}})
-    monkeypatch.setattr(paypal, "authorize_order", lambda t: mk(payers[t], 10 if t == "TOK-E1" else 20))
+                                    "payments": {"authorizations": [{"id": f"AUTH-{t}", "amount": {"value": "25.00", "currency_code": "USD"}}]}}]}
+    monkeypatch.setattr(paypal, "create_order", create)
+    monkeypatch.setattr(paypal, "get_order", get_order)
+    monkeypatch.setattr(paypal, "authorize_order", authorize_order)
     monkeypatch.setattr(paypal, "capture_authorization", lambda a: {"id": "CAP-" + a, "status": "COMPLETED"})
+    return calls
+
+
+def _buy(c, device):
+    """Start a checkout the way the store page does, then come back from PayPal as the buyer."""
+    tok = c.post("/checkout/create", json={"device_id": device}).json()["id"]
+    return tok, c.get("/checkout/return", params={"token": tok})
+
+
+def test_screened_checkout_end_to_end_with_mocked_paypal(monkeypatch):
+    _paypal_env(monkeypatch, {"TOK-E1": ("E1", 10), "TOK-E2": ("E2", 20)})
     with TestClient(app) as c:
-        r1 = c.get("/checkout/return", params={"token": "TOK-E1", "dev": "e2e-ring"})
-        r2 = c.get("/checkout/return", params={"token": "TOK-E2", "dev": "e2e-ring"})
+        t1, r1 = _buy(c, "e2e-ring")
+        t2, r2 = _buy(c, "e2e-ring")
         orders = {o["id"]: o for o in c.get("/api/orders").json()}
-        assert "payment received" in r1.text and orders["TOK-E1"]["status"] == "captured"
-        assert "being reviewed" in r2.text and orders["TOK-E2"]["status"] == "pending_review"
-        assert "device or card" in orders["TOK-E2"]["reason"]
+        assert "payment received" in r1.text and orders[t1]["status"] == "captured"
+        assert "being reviewed" in r2.text and orders[t2]["status"] == "pending_review"
+        assert "device or card" in orders[t2]["reason"]
 
 
 def test_returning_buyer_cannot_shake_ring_by_switching_device(monkeypatch):
-    from app import paypal
-    from app.config import settings
     from app.db import SessionLocal, Account
-    monkeypatch.setattr(settings, "screening", True, raising=False)
-    def mk(pid, n):
-        return {"payer": {"payer_id": pid, "email_address": f"{pid}@x.test"},
-                "purchase_units": [{"shipping": {"address": {"address_line_1": f"{n} oak st", "postal_code": str(n), "country_code": "US"}},
-                                    "payments": {"authorizations": [{"id": f"AUTH-{pid}-{n}", "amount": {"value": "25.00", "currency_code": "USD"}}]}}]}
-    seq = {"T1": ("R9A", 1), "T2": ("R9B", 2), "T3": ("R9A", 3)}   # R9A comes back
-    monkeypatch.setattr(paypal, "get_order", lambda t: {"payer": {"payer_id": seq[t][0]}})
-    monkeypatch.setattr(paypal, "authorize_order", lambda t: mk(*seq[t]))
-    monkeypatch.setattr(paypal, "capture_authorization", lambda a: {"id": "CAP-" + a, "status": "COMPLETED"})
+    _paypal_env(monkeypatch, {"T1": ("R9A", 1), "T2": ("R9B", 2), "T3": ("R9A", 3)})   # R9A comes back
     with TestClient(app) as c:
-        c.get("/checkout/return", params={"token": "T1", "dev": "sticky-ring"})
-        c.get("/checkout/return", params={"token": "T2", "dev": "sticky-ring"})
-        r3 = c.get("/checkout/return", params={"token": "T3", "dev": "a-brand-new-browser"})   # tries to shake the link
+        _buy(c, "sticky-ring")
+        _buy(c, "sticky-ring")
+        _, r3 = _buy(c, "a-brand-new-browser")   # tries to shake the link
         assert SessionLocal().get(Account, "R9A").device_id == "sticky-ring"
         assert "being reviewed" in r3.text
+
+
+def test_price_is_set_by_the_server_not_the_browser(monkeypatch):
+    calls = _paypal_env(monkeypatch, {"TP1": ("P1", 1)})
+    with TestClient(app) as c:
+        c.post("/checkout/create", json={"device_id": "d", "amount": "0.01"})
+        assert calls["create"] == [("25.00", "USD", "AUTHORIZE")]
+
+
+def test_returning_order_must_match_the_checkout_we_started(monkeypatch):
+    from app.db import SessionLocal, Checkout
+    calls = _paypal_env(monkeypatch, {"TQ1": ("Q1", 1), "TQ2": ("Q2", 2)})
+    with TestClient(app) as c:
+        unknown = c.get("/checkout/return", params={"token": "NEVER-STARTED-HERE"})
+        assert "not recognised" in unknown.text and calls["authorize"] == []          # PayPal is never touched
+        tok, first = _buy(c, "once")
+        again = c.get("/checkout/return", params={"token": tok})                       # reload / replayed link
+        assert "payment received" in first.text and "already processed" in again.text
+        assert calls["authorize"] == [tok]                                              # authorized exactly once
+        assert SessionLocal().get(Checkout, tok).status == "used"
+
+
+def test_amount_or_status_mismatch_is_declined_before_any_money_moves(monkeypatch):
+    from app.db import SessionLocal, Checkout
+    calls = _paypal_env(monkeypatch, {"TM1": ("M1", 1)}, amount="1.00")                 # PayPal says $1, we asked for $25
+    with TestClient(app) as c:
+        tok, r = _buy(c, "d")
+        assert "Order declined" in r.text and calls["authorize"] == []
+        assert SessionLocal().get(Checkout, tok).status == "rejected"
+    calls = _paypal_env(monkeypatch, {"TM2": ("M2", 2)}, status="CREATED")             # buyer never approved
+    with TestClient(app) as c:
+        _, r = _buy(c, "d")
+        assert "Order declined" in r.text and calls["authorize"] == []
+
+
+def test_admin_endpoints_fail_closed_when_the_token_is_missing_in_production(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "admin_required", True, raising=False)
+    monkeypatch.setattr(settings, "admin_token", "", raising=False)
+    with TestClient(app) as c:
+        assert c.post("/api/detect").status_code == 503
+        assert c.get("/api/cases").status_code == 200                                   # read-only stays public
+        monkeypatch.setattr(settings, "admin_token", "tok", raising=False)
+        assert c.post("/api/detect").status_code == 401
+        assert c.post("/api/detect", headers={"X-Admin-Token": "tok"}).status_code == 200
+
+
+def test_order_transitions_are_atomic_and_roll_back_on_paypal_failure(monkeypatch):
+    from app import paypal
+    from app.db import SessionLocal, Account, Txn, Order, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="AT1", device_id="atd", ip="1", shipping_address="a"))
+    for n in ("1", "2"):
+        s.merge(Txn(id=f"auth:AT{n}", account_id="AT1", ts="2026-11-05T10:00:00", amount=25.0))
+    s.merge(Order(id="OAT1", account_id="AT1", auth_id="AT1", amount=25.0, ts="2026-11-05T10:00:00", status="pending_review"))
+    s.merge(Order(id="OAT2", account_id="AT1", auth_id="AT2", amount=25.0, ts="2026-11-05T10:00:00", status="capturing"))   # another request owns it
+    s.commit()
+    def boom(a): raise paypal.PayPalError("declined by PayPal")
+    monkeypatch.setattr(paypal, "capture_authorization", boom)
+    monkeypatch.setattr(paypal, "void_authorization", boom)
+    with TestClient(app) as c:
+        assert c.post("/api/orders/OAT2/capture").status_code == 409                    # already being processed
+        assert c.post("/api/orders/OAT2/void").status_code == 409
+        assert c.post("/api/orders/OAT1/capture").status_code == 502                    # PayPal failed...
+        assert {o["id"]: o for o in c.get("/api/orders").json()}["OAT1"]["status"] == "pending_review"   # ...so it is retryable
+        assert c.post("/api/orders/OAT1/void").status_code == 502
+        assert {o["id"]: o for o in c.get("/api/orders").json()}["OAT1"]["status"] == "pending_review"
 
 
 def test_spread_rule_holds_slow_ring_but_not_a_household():
