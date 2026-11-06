@@ -38,8 +38,10 @@ select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--bd)
 <main><section><div class="sec">Merchant view</div><div class="card"><h2>Cases</h2><div id="gc" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div>
+<div class="card"><h2>Recent orders</h2><div id="recent"></div></div>
 <div class="card"><h2>Activity</h2><ul id="act" class="tl"></ul></div></section>
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
+<div class="card" id="why" style="display:none"></div>
 <div class="sec">Proof it works</div>
 <div class="card" id="watch"><h2>Watch an attack get stopped <span class="mu" style="font-weight:400;font-size:12px">(no login needed)</span></h2>
 <p class="mu" style="margin-top:0">Pick a scenario and replay it purchase by purchase through the live hold rule. Synthetic data, no PayPal calls.</p>
@@ -74,7 +76,7 @@ function mount(el,id,cols,rows,onSel){const box=$(id);
   rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
  box.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>onSel&&onSel(rows[tr.dataset.i]));return el}
 const gC={},gD={};
-async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
+async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});loadRecent().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
  CASES=await api('/api/cases');const D=await api('/api/disputes');
  mount(gC,'#gc',[{field:'id',headerName:'ID',maxWidth:70},{field:'status',headerName:'Status'},
   {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
@@ -101,8 +103,8 @@ const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><s
 async function loadOrders(){const O=await api('/api/orders'),sum=f=>O.filter(f).reduce((a,o)=>a+o.amount,0).toFixed(2);
  $('#tiles').innerHTML=tile('Prevented','$'+sum(o=>o.status==='voided'),'voided before any money moved')+tile('Pending review','$'+sum(o=>o.status==='pending_review'),'authorized, awaiting your decision')+tile('Captured (net)','$'+sum(o=>o.status==='captured'&&!o.refunded),'charged and kept')+tile('Refunded','$'+sum(o=>o.status==='captured'&&o.refunded),'charged, then refunded');
  const P=O.filter(o=>o.status==='pending_review');
- $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
- document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
+ $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button> <button data-w="${esc(o.id)}">Why held?</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
+ document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{if(b.dataset.w)return explainOrder(b.dataset.w);const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
   twoStep(b,cap?'Click again to capture':'Click again to void',async()=>{try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})})}
 async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Running...</p>';
  try{const r=await api('/api/eval?seeds=20');
@@ -130,6 +132,16 @@ $('#rtbtn').onclick=async()=>{const o=$('#rtbtn');o.disabled=true;o.textContent=
 $('#rs').onchange=()=>{$('#rout').innerHTML=''};
 async function loadActivity(){const A=await api('/api/activity');
  $('#act').innerHTML=A.length?A.map(e=>`<li><i class="${e.kind}"></i><span class="mu" style="flex:none">${esc(e.when.slice(5,16).replace('T',' '))}</span><span>${esc(e.text)}</span></li>`).join(''):'<li class="mu">Nothing yet.</li>'}
+async function loadRecent(){const O=await api('/api/orders'),col={captured:'var(--ok)',pending_review:'var(--warn)',voided:'var(--mu)'};
+ $('#recent').innerHTML=O.length?'<table class="pt"><tr><th>Time</th><th>Buyer</th><th>Status</th><th></th></tr>'+O.slice(0,10).map(o=>`<tr><td>${esc(o.ts.slice(5,16).replace('T',' '))}</td><td>${esc(o.account_id.slice(0,5))}</td><td><span class="pill" style="border-color:${col[o.status]||'var(--bd)'}">${esc(o.status.replace('_',' '))}${o.refunded?' (refunded)':''}</span></td><td>${o.decision_recorded?`<button data-x="${esc(o.id)}">Explain</button>`:''}</td></tr>`).join('')+'</table>':'<p class="mu">No orders yet.</p>';
+ document.querySelectorAll('#recent button').forEach(b=>b.onclick=()=>explainOrder(b.dataset.x))}
+async function explainOrder(id){const w=$('#why');w.style.display='block';w.innerHTML='<h2>Why was this decided?</h2><p class="mu">Loading...</p>';w.scrollIntoView({behavior:'smooth',block:'nearest'});
+ try{const r=await api('/api/orders/'+id+'/explain'),sev={major:'var(--bad)',moderate:'var(--warn)',minor:'var(--mu)'},rp=r.replay,ok=v=>v?'<span style="color:var(--ok)">&#10003;</span>':'<span style="color:var(--bad)">&#10007;</span>';
+ w.innerHTML=`<h2>Why: <span style="color:${r.decision==='HOLD'?'var(--bad)':'var(--ok)'}">${r.decision}</span> <span class="pill">policy ${esc(r.policy.version)}</span></h2>
+ <p>${r.reason?'This buyer '+esc(r.reason)+'.':'No strong link to a flagged ring, so the order was charged normally.'}${r.score!=null?' Cluster score '+r.score+'.':''}</p><b>Evidence behind it</b>`
+ +(r.factors.length?r.factors.map(f=>`<div style="margin:8px 0"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><span>${esc(f.provenance&&f.provenance.label?f.provenance.label:f.signal)}</span><span style="color:${sev[f.severity]};font-weight:600">${f.severity}${f.contribution!=null?' ('+f.contribution+')':''}</span></div>${f.share!=null?`<div style="height:6px;background:var(--bd);border-radius:3px"><div style="height:6px;width:${Math.round(f.share*100)}%;background:${sev[f.severity]};border-radius:3px"></div></div>`:''}${f.provenance?`<div class="mu" style="font-size:12px">Source: ${esc(f.provenance.source)}. Reliability: ${esc(f.provenance.reliability)}. ${esc(f.provenance.limit)}</div>`:''}</div>`).join(''):'<p class="mu">Nothing was flagged for this buyer.</p>')
+ +(r.counterfactuals.length?'<p style="margin-bottom:2px"><b>What would change the decision</b> <span class="mu" style="font-size:12px">(same rule re-run on altered evidence)</span></p><table class="pt">'+r.counterfactuals.map(c=>`<tr><td>${esc(c.change)}</td><td>${c.hold?'held':'charged'}</td><td>${c.flips?'<b>changes it</b>':'<span class="mu">no change</span>'}</td></tr>`).join('')+'</table>':'')
+ +'<p style="margin-bottom:2px"><b>Decision replay</b></p>'+(rp.possible?`<div style="font-size:13px">${ok(rp.evidence_intact)} Stored evidence is intact (hash matches)<br>${ok(rp.matches_original)} Replaying it under policy ${esc(rp.policy_version_original)} gives the original decision<br>${ok(rp.current_policy_gives_same)} Today's policy (${esc(rp.policy_version_now)}) gives the same decision${rp.current_policy_gives_same?'':' (it would '+rp.current_decision+')'}</div><p class="mu" style="font-size:12px">${esc(rp.note)}</p>`:`<p class="mu">${esc(rp.note)}</p>`)}catch(e){w.innerHTML='<h2>Why was this decided?</h2><p class="mu">'+esc(e.message)+'</p>'}}
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

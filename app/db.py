@@ -78,6 +78,18 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class Decision(Base):  # the evidence and policy behind each screening decision, kept so it can be replayed
+    __tablename__ = "decisions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String, index=True)
+    account_id: Mapped[str] = mapped_column(String)
+    ts: Mapped[str] = mapped_column(String)
+    policy_json: Mapped[str] = mapped_column(Text)
+    inputs_json: Mapped[str | None] = mapped_column(Text, nullable=True)   # null when the snapshot was too large to keep
+    inputs_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+    result_json: Mapped[str] = mapped_column(Text)
+
+
 class Checkout(Base):  # one row per checkout WE started: binds a returning PayPal order to what we asked for
     __tablename__ = "checkouts"
     id: Mapped[str] = mapped_column(String, primary_key=True)  # PayPal order id we created

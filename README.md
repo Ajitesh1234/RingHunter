@@ -37,6 +37,14 @@ The dashboard has a **Self-test** button (and `GET /api/eval`). It generates syn
 
 The evaluation exposed that a ring which slows down evaded the timing signal. We added one rule (a device used by 3+ accounts that ship to 3+ different addresses is held for review), and the table shows the before and after. **These are our own synthetic scenarios, not real traffic. The first buyer in a ring can never be blocked, because nothing links them yet.**
 
+## Every decision can be explained and replayed
+The hold decision is one pure, deterministic function of the evidence and a versioned policy. The live checkout, the self-test and the explanations all call that same function. For every screened order we store the exact evidence snapshot, the policy version and a SHA-256 hash of the snapshot. The dashboard's **Why was this decided?** panel then shows:
+- **The evidence behind the decision**, factor by factor, with **where each signal came from and how far to trust it** (for example, the device ID is a browser value our checkout supplies and can be changed; the address comes from the PayPal order; the IP is seen by our server).
+- **What would change the decision:** the same rule re-run with one piece of the buyer's evidence altered (a different device, address, IP, or a purchase three days later).
+- **A decision replay:** the stored evidence is re-checked against its hash, re-run under the original policy, and compared with today's policy.
+
+What this proves and what it does not: replay shows the decision is deterministic and that the stored evidence has not been altered since. It does not prove the decision was correct. A hash kept next to the data is tamper-evident for casual edits, not tamper-proof against someone who controls the database. Snapshots larger than 400 accounts are not kept, and the panel says so instead of faking a replay.
+
 ## AI red team: attacks we did not write
 A self-test written by the same author as the detector is circular, so the dashboard also has an **AI red team**. A separate model (the same Groq model, prompted only as an adversary) is told what the detector can observe (device, address, IP, purchase times) and asked to invent six evasion strategies. Its output is validated against a fixed schema (bounded sizes, allowed modes only), each strategy is replayed against the live hold rule, and the dashboard reports what got through, with a short AI commentary on which extra signal might catch it. Live runs are public but rate-limited (90 seconds between runs, 40 per day) to protect the free model quota; in between, the most recent result stays on screen. The model never touches checkout, the database or PayPal. With no key, or if the call fails, an offline sample set (written by us, and labelled as such) is shown instead. In our offline sample, 3 of 6 strategies evade the detector (for example, rotating devices with no other link), and we show that rather than hide it.
 

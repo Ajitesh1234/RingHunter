@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools
 from .config import settings
-from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, now
+from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, Decision, now
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -276,7 +276,9 @@ def _screened_checkout(s, request, token, dev):
     s.merge(Order(id=token, account_id=pid, auth_id=a["id"], amount=amount, ts=ts, status="authorized"))
     s.commit()
     o = s.get(Order, token)
+    inputs_before = eng.load_inputs(s)              # the exact evidence this decision is made on
     hold, case_id, reason = screening.screen(s, pid)
+    screening.record_decision(s, token, pid, *inputs_before)
     if hold:
         o.status, o.reason, o.case_id = "pending_review", reason, case_id
         s.commit()
@@ -292,9 +294,10 @@ def _screened_checkout(s, request, token, dev):
 def list_orders(s=Depends(db)):
     rows = list(s.scalars(select(Order).order_by(Order.ts.desc())))
     refunded = {x.id for x in s.scalars(select(Txn).where(Txn.refunded == 1))}
+    decided = {d.order_id for d in s.scalars(select(Decision))}
     return [{"id": o.id, "account_id": o.account_id, "amount": o.amount, "ts": o.ts, "status": o.status,
              "reason": o.reason, "case_id": o.case_id, "capture_id": o.capture_id,
-             "refunded": o.capture_id in refunded} for o in rows]
+             "refunded": o.capture_id in refunded, "decision_recorded": o.id in decided} for o in rows]
 
 
 def _order(s, oid) -> Order:
@@ -302,6 +305,15 @@ def _order(s, oid) -> Order:
     if not o:
         raise HTTPException(404, "order not found")
     return o
+
+
+@app.get("/api/orders/{oid}/explain")
+def order_explain(oid: str, s=Depends(db)):
+    """Why was this order held or charged? Evidence with provenance, what-ifs, and a replay under the original policy."""
+    out = screening.explain(s, oid)
+    if out is None:
+        raise HTTPException(404, "no stored decision for this order (it was screened before decisions were recorded)")
+    return out
 
 
 def _claim(s, oid, from_statuses, to_status):

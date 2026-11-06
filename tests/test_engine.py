@@ -591,3 +591,83 @@ def test_case_file_lists_tools_used_and_always_shows_linked_disputes(monkeypatch
     monkeypatch.setattr(llm, "provider", lambda: "offline")                       # offline analyst shows the dispute too
     cf2, _ = investigator.investigate(s, entry)
     assert any("PayPal dispute" in line for line in cf2.key_evidence) and cf2.tools_used == []
+
+
+# ---------------- decision replay, counterfactuals, provenance ----------------
+def _acc(i, dev, addr, ip="ip-x"):
+    return {"device_id": dev, "card_fp": f"none_card_{i}", "ip": ip, "shipping_address": addr}   # unique placeholder, as in production
+
+
+def test_decide_is_pure_and_separates_strong_from_weak_evidence():
+    from app.screening import decide
+    ts = lambda m: [{"timestamp": f"2026-11-06T10:{m:02d}:00", "amount": 25.0}]
+    ring = {"A": _acc("A", "dev1", "a1", "i1"), "B": _acc("B", "dev1", "a2", "i2")}
+    t = {"A": ts(0), "B": ts(2)}
+    d1, d2 = decide(ring, t, "B"), decide(ring, t, "B")
+    assert d1 == d2 and d1["hold"] and d1["kind"] == "cluster" and "device" in d1["reason"]    # same inputs, same answer
+    weak = {"A": _acc("A", "d1", "same-home", "i1"), "B": _acc("B", "d2", "same-home", "i2")}
+    assert decide(weak, t, "B")["hold"] is False                                              # an address alone never holds
+    assert decide(ring, t, "B", {**__import__("app.policy", fromlist=["x"]).current(), "min_score": 0.99})["hold"] is False
+    slow = {k: _acc(k, "shared", f"addr{k}", f"i{k}") for k in "XYZ"}
+    days = {k: [{"timestamp": f"2026-11-0{i + 1}T09:00:00", "amount": 25.0}] for i, k in enumerate("XYZ")}
+    assert decide(slow, days, "Z")["kind"] == "device_spread"
+    blank = {k: {**_acc(k, "shared", "x", f"i{k}"), "shipping_address": f"none_addr_{k}"} for k in "XYZ"}
+    assert decide(blank, days, "Z")["hold"] is False                                          # missing addresses are not "different addresses"
+
+
+def _ring_orders(monkeypatch, tag):
+    _paypal_env(monkeypatch, {f"{tag}1": (f"{tag}P1", 1), f"{tag}2": (f"{tag}P2", 2)})
+    c = TestClient(app)
+    c.__enter__()
+    t1, _ = _buy(c, f"explain-{tag}")
+    t2, _ = _buy(c, f"explain-{tag}")
+    return c, t1, t2
+
+
+def test_every_screened_order_can_be_explained_and_replayed(monkeypatch):
+    c, t1, t2 = _ring_orders(monkeypatch, "EX")
+    try:
+        first, second = c.get(f"/api/orders/{t1}/explain").json(), c.get(f"/api/orders/{t2}/explain").json()
+        assert first["decision"] == "CHARGE" and first["factors"] == []
+        assert second["decision"] == "HOLD" and second["policy"]["version"]
+        assert any("device" in f["signal"] and f["provenance"]["source"] for f in second["factors"])   # every factor says where it came from
+        rp = second["replay"]
+        assert rp["possible"] and rp["evidence_intact"] and rp["matches_original"] and rp["current_policy_gives_same"]
+        by = {x["change"]: x for x in second["counterfactuals"]}
+        assert by["If this buyer had used a different device"]["flips"] is True               # without the shared device it is not held
+        assert by["If this buyer shared nothing with anyone"]["flips"] is True
+        assert c.get("/api/orders/NO-SUCH-ORDER/explain").status_code == 404
+        assert {o["id"]: o for o in c.get("/api/orders").json()}[t2]["decision_recorded"] is True
+    finally:
+        c.__exit__(None, None, None)
+
+
+def test_replay_detects_tampered_evidence_and_policy_drift(monkeypatch):
+    from app import policy as policy_mod
+    from app.db import SessionLocal, Decision
+    from sqlalchemy import select
+    c, t1, t2 = _ring_orders(monkeypatch, "TP")
+    try:
+        monkeypatch.setitem(policy_mod.POLICY, "min_score", 0.99)                             # today's policy is stricter than the original
+        rp = c.get(f"/api/orders/{t2}/explain").json()["replay"]
+        assert rp["matches_original"] is True and rp["current_policy_gives_same"] is False and rp["current_decision"] == "CHARGE"
+        monkeypatch.setitem(policy_mod.POLICY, "min_score", 0.5)
+        s = SessionLocal()
+        row = s.scalars(select(Decision).where(Decision.order_id == t2)).first()
+        row.inputs_json = row.inputs_json.replace("explain-TP", "somebody-else")             # someone edits the stored evidence
+        s.commit()
+        rp = c.get(f"/api/orders/{t2}/explain").json()["replay"]
+        assert rp["evidence_intact"] is False and rp["matches_original"] is False and "NOT replayed" in rp["note"]
+    finally:
+        c.__exit__(None, None, None)
+
+
+def test_oversized_snapshots_report_the_limit_instead_of_faking_a_replay(monkeypatch):
+    from app import screening
+    monkeypatch.setattr(screening, "MAX_SNAPSHOT_ACCOUNTS", 0)
+    c, t1, t2 = _ring_orders(monkeypatch, "BG")
+    try:
+        out = c.get(f"/api/orders/{t2}/explain").json()
+        assert out["replay"]["possible"] is False and "cannot be replayed" in out["replay"]["note"] and out["counterfactuals"] == []
+    finally:
+        c.__exit__(None, None, None)

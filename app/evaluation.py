@@ -3,9 +3,8 @@ Runs entirely in memory (no database, no PayPal). It replays purchases in time o
 after each purchase it runs detection and HOLDS the buyer only if they share a device or card with a flagged ring."""
 import random
 from datetime import datetime, timedelta
-from . import detection_core as core
-from .investigator import split_members, STRONG
-from .screening import spread_rule
+from . import policy as policy_mod
+from .screening import decide
 
 T0 = datetime(2026, 11, 2, 10, 0, 0)
 PRICE = 25.0
@@ -49,29 +48,18 @@ def _purchases(spec, n, rng, label):
     return out
 
 
-def _replay(purchases, use_spread=True):
-    """Replays purchases in time order and records, for each one, whether live screening would hold it and why."""
+def _replay(purchases, use_spread=True, policy=None):
+    """Replays purchases in time order through the SAME decision function the live checkout uses."""
+    pol = dict(policy or policy_mod.current())
+    if not use_spread:
+        pol["spread_min_accounts"] = 10 ** 9
     accounts, txns, out = {}, {}, []
     for p in purchases:
         accounts[p["id"]] = {"device_id": p["device"], "card_fp": f"none_card_{p['id']}", "ip": p["ip"],
                              "shipping_address": p["addr"]}
         txns[p["id"]] = [{"timestamp": p["ts"].isoformat(timespec="seconds"), "amount": PRICE}]
-        trail, _ = core.run_detection(accounts, txns)
-        hold, reason = False, None
-        for e in trail:
-            if e["decision"] != "NOT_FLAGGED" and e["cluster_size"] >= 2 and p["id"] in e["cluster_members"]:
-                if p["id"] in split_members(e)[0]:
-                    mine = [ed for ed in e["edges"] if p["id"] in ed["pair"] and STRONG & set(ed["shared_attributes"])]
-                    attrs = sorted({x for ed in mine for x in ed["shared_attributes"] if x in STRONG})
-                    partners = {m for ed in mine for m in ed["pair"] if m != p["id"]}
-                    hold = True
-                    reason = f"shares {' and '.join(a.replace('_id', '').replace('_fp', '') for a in attrs)} with {len(partners)} earlier buyer(s) in a flagged ring"
-        if use_spread and not hold:
-            group = [a for a in accounts.values() if a["device_id"] == p["device"]]
-            if spread_rule([a["shipping_address"] for a in group]):
-                hold = True
-                reason = f"one device used by {len(group)} accounts shipping to {len({a['shipping_address'] for a in group})} different addresses"
-        out.append({"hold": hold, "reason": reason})
+        d = decide(accounts, txns, p["id"], pol)
+        out.append({"hold": d["hold"], "reason": d["reason"]})
     return out
 
 
