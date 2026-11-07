@@ -9,6 +9,7 @@
 - **Screening rules:** core versus peripheral evidence, sticky identifiers, and the device-spread rule (added after the self-test exposed a slow-ring evasion).
 - **AI investigator** (tool-calling model) with deterministic guardrails (schema validation, allow-listed actions, core-only hold and refund, mandatory caveats), single-shot and offline fallbacks, and read-only PayPal lookups through the PayPal Agent Toolkit core.
 - **Explainable, replayable decisions:** one pure decision function, a versioned policy, stored evidence snapshots with hashes, signal provenance, counterfactuals and replay.
+- **Payment truth:** Verify-with-PayPal comparison, unknown-outcome handling with reconcile, retry-safe refunds, a hash-chained audit ledger and a case evidence export.
 - **Self-test and AI red team:** synthetic evaluation, and a separate model that invents attacks which we replay (offline sample and quota limits included).
 - **Merchant dashboard** (AG Grid tables, ring graph, held-orders panel, activity timeline, no-login replay), the store and result pages, the admin lock.
 - **Disputes:** webhook storage, linking to buyers and rings, evidence drafting and sending.

@@ -1,4 +1,6 @@
 import json
+import time
+import hashlib
 from decimal import Decimal
 from datetime import datetime, timezone
 import secrets
@@ -10,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import select, update
-from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools
+from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools, ledger
 from .config import settings
 from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, Decision, now
 
@@ -282,9 +284,22 @@ def _screened_checkout(s, request, token, dev):
     if hold:
         o.status, o.reason, o.case_id = "pending_review", reason, case_id
         s.commit()
+        ledger.append(s, "system", "order.held", token, {"account": pid, "case": case_id, "reason": reason})
         return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.")
-    screening.capture_order(s, o)
+    try:
+        screening.capture_order(s, o)
+    except paypal.PayPalUnknown:
+        o.status, o.reason = "outcome_unknown", "Automatic capture was sent but PayPal did not answer. Reconcile with PayPal."
+        s.commit()
+        ledger.append(s, "system", "order.outcome_unknown", token, {"step": "auto-capture"})
+        return _result_page("hold", "Thanks. We are confirming your order.", "You will not be charged twice.")
+    except paypal.PayPalError as e:
+        o.status, o.reason = "pending_review", f"Automatic capture failed ({str(e)[:90]}). Review it and capture manually."
+        s.commit()
+        ledger.append(s, "system", "order.capture_failed", token, {"error": str(e)[:200]})
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.")
     s.commit()
+    ledger.append(s, "system", "order.captured", token, {"auto": True, "capture_id": o.capture_id})
     eng.detect(s)
     return _result_page("ok", "Thanks, payment received.", "Your order is confirmed.")
 
@@ -323,6 +338,13 @@ def _claim(s, oid, from_statuses, to_status):
     return res.rowcount == 1
 
 
+def _unknown(s, o, step, actor="merchant"):
+    o.status, o.reason = "outcome_unknown", f"The {step} was sent but PayPal did not answer. Reconcile with PayPal before doing anything else."
+    s.commit()
+    ledger.append(s, actor, "order.outcome_unknown", o.id, {"step": step})
+    return JSONResponse(status_code=202, content={"status": "outcome_unknown", "message": o.reason})
+
+
 @app.post("/api/orders/{oid}/capture", dependencies=[ADMIN])
 def order_capture(oid: str, s=Depends(db)):
     o = _order(s, oid)
@@ -331,17 +353,22 @@ def order_capture(oid: str, s=Depends(db)):
         return {"idempotent_replay": True, "status": prev}
     if prev == "voided":
         raise HTTPException(409, "order was voided")
+    if prev == "outcome_unknown":
+        raise HTTPException(409, "The outcome of the last attempt is unknown. Reconcile with PayPal first.")
     if not _claim(s, oid, ("pending_review", "authorized"), "capturing"):
         raise HTTPException(409, "order is already being processed")
     o = s.get(Order, oid)
     s.refresh(o)
     try:
         screening.capture_order(s, o)
+    except paypal.PayPalUnknown:
+        return _unknown(s, o, "capture")             # it may have worked: never assume, never roll back blindly
     except paypal.PayPalError as e:
-        o.status = prev                               # nothing moved: put it back so the merchant can retry
+        o.status = prev                               # PayPal answered "no": nothing moved, so put it back and allow a retry
         s.commit()
         raise HTTPException(502, f"PayPal rejected the capture: {e}")
     s.commit()
+    ledger.append(s, "merchant", "order.captured", oid, {"capture_id": o.capture_id})
     eng.detect(s)
     return {"status": o.status, "capture_id": o.capture_id}
 
@@ -354,18 +381,84 @@ def order_void(oid: str, s=Depends(db)):
         return {"idempotent_replay": True, "status": prev}
     if prev == "captured":
         raise HTTPException(409, "order already captured; use refund instead")
+    if prev == "outcome_unknown":
+        raise HTTPException(409, "The outcome of the last attempt is unknown. Reconcile with PayPal first.")
     if not _claim(s, oid, ("pending_review", "authorized"), "voiding"):
         raise HTTPException(409, "order is already being processed")
     o = s.get(Order, oid)
     s.refresh(o)
     try:
         screening.void_order(s, o)
+    except paypal.PayPalUnknown:
+        return _unknown(s, o, "void")
     except paypal.PayPalError as e:
         o.status = prev
         s.commit()
         raise HTTPException(502, f"PayPal rejected the void: {e}")
     s.commit()
+    ledger.append(s, "merchant", "order.voided", oid, {})
     return {"status": o.status}
+
+
+@app.post("/api/orders/{oid}/reconcile", dependencies=[ADMIN])
+def order_reconcile(oid: str, s=Depends(db)):
+    """Settle an order from PayPal's own answer (used when a capture or void got no response)."""
+    o = _order(s, oid)
+    try:
+        outcome, view = screening.reconcile(s, o)
+    except paypal.PayPalError as e:
+        raise HTTPException(502, f"Could not get PayPal's answer to reconcile: {e}")
+    s.commit()
+    ledger.append(s, "merchant", "order.reconciled", oid, {"outcome": outcome, "paypal": view})
+    eng.detect(s)
+    return {"outcome": outcome, "status": o.status, "paypal": view}
+
+
+_verify_log = []
+
+
+@app.get("/api/orders/{oid}/verify")
+def order_verify(oid: str, s=Depends(db)):
+    """Ask PayPal what it says about this order and compare with our record. Public (judges can use it), rate-limited."""
+    now_t = time.time()
+    _verify_log[:] = [x for x in _verify_log if x > now_t - 60]
+    if len(_verify_log) >= 30:
+        raise HTTPException(429, "Too many PayPal checks in the last minute. Try again shortly.")
+    o = _order(s, oid)
+    _verify_log.append(now_t)
+    try:
+        return screening.verify(s, o)
+    except paypal.PayPalError as e:
+        raise HTTPException(502, f"PayPal did not answer: {e}")
+
+
+@app.get("/api/ledger")
+def ledger_view(limit: int = 12, s=Depends(db)):
+    return {"verification": ledger.verify(s), "events": ledger.recent(s, max(1, min(limit, 50)))}
+
+
+def _h8(v):
+    return hashlib.sha256(str(v).encode()).hexdigest()[:8] if v else None
+
+
+@app.get("/api/cases/{cid}/export")
+def case_export(cid: int, s=Depends(db)):
+    """A self-contained evidence package for one case. Identifiers are hashed (first 8 hex of SHA-256)."""
+    c = _case(s, cid)
+    entry = json.loads(c.entry_json)
+    members = entry["cluster_members"]
+    accts = [{"account_id": a.id, "device_hash": _h8(a.device_id), "ip_hash": _h8(a.ip), "address_hash": _h8(a.shipping_address)}
+             for a in s.scalars(select(Account).where(Account.id.in_(members)))]
+    orders = list(s.scalars(select(Order).where(Order.account_id.in_(members))))
+    decisions = [d for d in (screening.explain(s, o.id) for o in orders) if d]
+    refs = {o.id for o in orders} | {f"case:{cid}"}
+    events = sorted((e for e in ledger.recent(s, 500) if e["ref"] in refs), key=lambda e: e["seq"])
+    body = {"generated_at": now().replace(tzinfo=None).isoformat(timespec="seconds"), "case": _out(s, c), "accounts": accts,
+            "orders": [{"id": o.id, "account_id": o.account_id, "amount": o.amount, "status": o.status, "reason": o.reason, "capture_id": o.capture_id} for o in orders],
+            "decisions": decisions, "disputes": [dsp.as_dict(s, d) for d in s.scalars(select(Dispute).where(Dispute.account_id.in_(members)))],
+            "ledger_events": events, "ledger_verification": ledger.verify(s),
+            "notes": "Device, IP and address values are replaced by short hashes. Replay and what-ifs are in each decision."}
+    return JSONResponse(body, headers={"Content-Disposition": f'attachment; filename="ringhunter-case-{cid}.json"'})
 
 
 # ---------- verified PayPal webhooks ----------
@@ -382,6 +475,11 @@ async def webhook(request: Request, s=Depends(db)):
             s.rollback()
             s.merge(Event(id=event["id"], type=event["event_type"], payload_json=json.dumps(event)))
     s.commit()
+    if event["event_type"].startswith("CUSTOMER.DISPUTE"):
+        try:
+            ledger.append(s, "paypal-webhook", "dispute.event", (event.get("resource") or {}).get("dispute_id"), {"type": event["event_type"]})
+        except Exception:
+            s.rollback()
     return {"received": True}
 
 
@@ -400,6 +498,7 @@ def demo_reset(s=Depends(db)):
     for m in (ActionLog, Blocked, Case, Txn, Account, Order):
         s.query(m).delete()
     s.commit()
+    ledger.append(s, "merchant", "demo.reset", None, {})   # the ledger itself is never wiped
     return {"reset": True}
 
 
@@ -465,21 +564,28 @@ def approve(cid: int, body: ApproveIn, s=Depends(db)):
         for a in ids:
             s.merge(Blocked(account_id=a, case_id=cid))
     elif rec["action"] == "refund_transactions":
-        for t in s.scalars(select(Txn).where(Txn.account_id.in_(ids))):
-            if t.refunded or not t.capture_id:
-                continue
-            if paypal.enabled() and not t.capture_id.startswith("CAP_"):
-                r = paypal.refund_capture(t.capture_id, request_id=f"rh-{cid}-{t.id}")
-                result["details"].append({"txn": t.id, "paypal_refund_id": r.get("id")})
-            else:
-                result["details"].append({"txn": t.id, "simulated": True})
-            t.refunded = 1
+        try:
+            for t in list(s.scalars(select(Txn).where(Txn.account_id.in_(ids)))):
+                if t.refunded or not t.capture_id:
+                    continue
+                if paypal.enabled() and not t.capture_id.startswith("CAP_"):
+                    r = paypal.refund_capture(t.capture_id, request_id=f"rh-{cid}-{t.id}")
+                    result["details"].append({"txn": t.id, "paypal_refund_id": r.get("id")})
+                else:
+                    result["details"].append({"txn": t.id, "simulated": True})
+                t.refunded = 1
+        except paypal.PayPalError as e:
+            s.rollback()
+            raise HTTPException(502, f"PayPal did not confirm every refund ({str(e)[:160]}). Nothing was recorded as done. "
+                                     "Approving again is safe: refunds carry idempotency keys, so none can be doubled.")
     s.add(ActionLog(key=key, case_id=cid, action=rec["action"], result_json=json.dumps(result)))
     if rec["action"] in ("hold_accounts", "refund_transactions"):
         c.status = "actioned"
     elif rec["action"] == "no_action":
         c.status = "dismissed"  # request_more_info only logs a note, so the case stays open
     s.commit()
+    ledger.append(s, "merchant", "case.approved", f"case:{cid}",
+                  {"action": rec["action"], "accounts": ids, "refunds": [d["paypal_refund_id"] for d in result["details"] if d.get("paypal_refund_id")]})
     return result
 
 
@@ -534,4 +640,5 @@ def dispute_evidence(did: str, body: EvidenceIn, s=Depends(db)):
         raise HTTPException(502, f"PayPal rejected the request: {e}")
     d.evidence_submitted = 1
     s.commit()
+    ledger.append(s, "merchant", "dispute.evidence_sent", did, {"method": body.method, "tracking_attached": bool(body.tracking_number)})
     return {"submitted": True, "method": body.method, "notes": notes, "paypal": r}

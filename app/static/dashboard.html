@@ -39,9 +39,11 @@ select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--bd)
 <div class="card"><h2>Disputes</h2><div id="gd" class="ag-theme-quartz"></div></div>
 <div class="card"><h2>Orders held for review <span class="mu" style="font-weight:400;font-size:12px">(authorized, not yet charged)</span></h2><div id="pend"></div></div>
 <div class="card"><h2>Recent orders</h2><div id="recent"></div></div>
-<div class="card"><h2>Activity</h2><ul id="act" class="tl"></ul></div></section>
+<div class="card"><h2>Activity</h2><ul id="act" class="tl"></ul></div>
+<div class="card"><h2>Audit ledger</h2><div id="ledger"></div></div></section>
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
 <div class="card" id="why" style="display:none"></div>
+<div class="card" id="truth" style="display:none"></div>
 <div class="sec">Proof it works</div>
 <div class="card" id="watch"><h2>Watch an attack get stopped <span class="mu" style="font-weight:400;font-size:12px">(no login needed)</span></h2>
 <p class="mu" style="margin-top:0">Pick a scenario and replay it purchase by purchase through the live hold rule. Synthetic data, no PayPal calls.</p>
@@ -76,7 +78,7 @@ function mount(el,id,cols,rows,onSel){const box=$(id);
   rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
  box.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>onSel&&onSel(rows[tr.dataset.i]));return el}
 const gC={},gD={};
-async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});loadRecent().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
+async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});loadRecent().catch(()=>{});loadLedger().catch(()=>{});try{const h=await api('/api/health');$('#health').textContent='AI: '+h.ai+' | sandbox: '+h.paypal_sandbox+' | admin lock: '+h.admin_protected}catch(e){}
  CASES=await api('/api/cases');const D=await api('/api/disputes');
  mount(gC,'#gc',[{field:'id',headerName:'ID',maxWidth:70},{field:'status',headerName:'Status'},
   {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
@@ -91,6 +93,7 @@ function graph(c){const m=c.cluster.cluster_members,core=split(c.cluster),n=m.le
  return `<svg viewBox="0 0 320 270" style="display:block;max-width:340px;margin:0 auto" width="100%" role="img" aria-label="Account link graph">${lines}${dots}</svg><div class="mu" style="font-size:12px"><span style="color:var(--bad)">&#9679;</span> core (shared device/card, solid line) &nbsp; <span style="color:var(--warn)">&#9679;</span> peripheral (address/IP only, dashed)</div>`}
 function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.status);
  let h=`<h2>Case ${c.id} <span class="pill">${esc(c.status)}</span> <span class="pill">${esc(c.decision.replace('FLAGGED_FOR_',''))} ${c.score}</span></h2>`+graph(c);
+ h+=`<p style="margin:4px 0"><a href="/api/cases/${c.id}/export" download="ringhunter-case-${c.id}.json" style="color:var(--ac);font-size:13px">Download evidence package (JSON)</a></p>`;
  if(!f)h+=`<p><button class="p" id="inv" ${closed?'disabled':''}>Investigate with AI analyst</button></p>`;
  else{h+=`<p>${esc(f.summary)}</p><p class="mu">Analyst: ${esc(f.analyst)} | confidence: ${esc(f.confidence)}${f.tools_used&&f.tools_used.length?' | tools: '+esc(f.tools_used.join(', ')):''}${f.fallback_reason?' | fallback: '+esc(f.fallback_reason):''}</p>
   <b>Evidence</b><ul>${f.key_evidence.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Caveats</b><ul>${f.caveats.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul><b>Recommended actions (need your approval)</b>`+
@@ -102,9 +105,9 @@ function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.s
 const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><span class="mu" style="font-size:12px">${c}</span></div>`;
 async function loadOrders(){const O=await api('/api/orders'),sum=f=>O.filter(f).reduce((a,o)=>a+o.amount,0).toFixed(2);
  $('#tiles').innerHTML=tile('Prevented','$'+sum(o=>o.status==='voided'),'voided before any money moved')+tile('Pending review','$'+sum(o=>o.status==='pending_review'),'authorized, awaiting your decision')+tile('Captured (net)','$'+sum(o=>o.status==='captured'&&!o.refunded),'charged and kept')+tile('Refunded','$'+sum(o=>o.status==='captured'&&o.refunded),'charged, then refunded');
- const P=O.filter(o=>o.status==='pending_review');
- $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br><button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button> <button data-w="${esc(o.id)}">Why held?</button></div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
- document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{if(b.dataset.w)return explainOrder(b.dataset.w);const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
+ const P=O.filter(o=>o.status==='pending_review'||o.status==='outcome_unknown');
+ $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br>${o.status==='outcome_unknown'?`<b style="color:var(--warn)">Outcome unknown: PayPal did not answer.</b> <button class="p" data-r="${esc(o.id)}">Reconcile with PayPal</button> <button data-t="${esc(o.id)}">Verify</button>`:`<button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button> <button data-w="${esc(o.id)}">Why held?</button> <button data-t="${esc(o.id)}">Verify</button>`}</div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
+ document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{if(b.dataset.w)return explainOrder(b.dataset.w);if(b.dataset.t)return verifyOrder(b.dataset.t);if(b.dataset.r)return twoStep(b,'Click again to reconcile',()=>reconcileOrder(b.dataset.r));const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
   twoStep(b,cap?'Click again to capture':'Click again to void',async()=>{try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})})}
 async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Running...</p>';
  try{const r=await api('/api/eval?seeds=20');
@@ -132,9 +135,9 @@ $('#rtbtn').onclick=async()=>{const o=$('#rtbtn');o.disabled=true;o.textContent=
 $('#rs').onchange=()=>{$('#rout').innerHTML=''};
 async function loadActivity(){const A=await api('/api/activity');
  $('#act').innerHTML=A.length?A.map(e=>`<li><i class="${e.kind}"></i><span class="mu" style="flex:none">${esc(e.when.slice(5,16).replace('T',' '))}</span><span>${esc(e.text)}</span></li>`).join(''):'<li class="mu">Nothing yet.</li>'}
-async function loadRecent(){const O=await api('/api/orders'),col={captured:'var(--ok)',pending_review:'var(--warn)',voided:'var(--mu)'};
- $('#recent').innerHTML=O.length?'<table class="pt"><tr><th>Time</th><th>Buyer</th><th>Status</th><th></th></tr>'+O.slice(0,10).map(o=>`<tr><td>${esc(o.ts.slice(5,16).replace('T',' '))}</td><td>${esc(o.account_id.slice(0,5))}</td><td><span class="pill" style="border-color:${col[o.status]||'var(--bd)'}">${esc(o.status.replace('_',' '))}${o.refunded?' (refunded)':''}</span></td><td>${o.decision_recorded?`<button data-x="${esc(o.id)}">Explain</button>`:''}</td></tr>`).join('')+'</table>':'<p class="mu">No orders yet.</p>';
- document.querySelectorAll('#recent button').forEach(b=>b.onclick=()=>explainOrder(b.dataset.x))}
+async function loadRecent(){const O=await api('/api/orders'),col={captured:'var(--ok)',pending_review:'var(--warn)',outcome_unknown:'var(--bad)',voided:'var(--mu)'};
+ $('#recent').innerHTML=O.length?'<table class="pt"><tr><th>Time</th><th>Buyer</th><th>Status</th><th></th></tr>'+O.slice(0,10).map(o=>`<tr><td>${esc(o.ts.slice(5,16).replace('T',' '))}</td><td>${esc(o.account_id.slice(0,5))}</td><td><span class="pill" style="border-color:${col[o.status]||'var(--bd)'}">${esc(o.status.replace('_',' '))}${o.refunded?' (refunded)':''}</span></td><td>${o.decision_recorded?`<button data-x="${esc(o.id)}">Explain</button> `:''}<button data-t="${esc(o.id)}">Verify</button></td></tr>`).join('')+'</table>':'<p class="mu">No orders yet.</p>';
+ document.querySelectorAll('#recent button').forEach(b=>b.onclick=()=>b.dataset.t?verifyOrder(b.dataset.t):explainOrder(b.dataset.x))}
 async function explainOrder(id){const w=$('#why');w.style.display='block';w.innerHTML='<h2>Why was this decided?</h2><p class="mu">Loading...</p>';w.scrollIntoView({behavior:'smooth',block:'nearest'});
  try{const r=await api('/api/orders/'+id+'/explain'),sev={major:'var(--bad)',moderate:'var(--warn)',minor:'var(--mu)'},rp=r.replay,ok=v=>v?'<span style="color:var(--ok)">&#10003;</span>':'<span style="color:var(--bad)">&#10007;</span>';
  w.innerHTML=`<h2>Why: <span style="color:${r.decision==='HOLD'?'var(--bad)':'var(--ok)'}">${r.decision}</span> <span class="pill">policy ${esc(r.policy.version)}</span></h2>
@@ -142,6 +145,17 @@ async function explainOrder(id){const w=$('#why');w.style.display='block';w.inne
  +(r.factors.length?r.factors.map(f=>`<div style="margin:8px 0"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><span>${esc(f.provenance&&f.provenance.label?f.provenance.label:f.signal)}</span><span style="color:${sev[f.severity]};font-weight:600">${f.severity}${f.contribution!=null?' ('+f.contribution+')':''}</span></div>${f.share!=null?`<div style="height:6px;background:var(--bd);border-radius:3px"><div style="height:6px;width:${Math.round(f.share*100)}%;background:${sev[f.severity]};border-radius:3px"></div></div>`:''}${f.provenance?`<div class="mu" style="font-size:12px">Source: ${esc(f.provenance.source)}. Reliability: ${esc(f.provenance.reliability)}. ${esc(f.provenance.limit)}</div>`:''}</div>`).join(''):'<p class="mu">Nothing was flagged for this buyer.</p>')
  +(r.counterfactuals.length?'<p style="margin-bottom:2px"><b>What would change the decision</b> <span class="mu" style="font-size:12px">(same rule re-run on altered evidence)</span></p><table class="pt">'+r.counterfactuals.map(c=>`<tr><td>${esc(c.change)}</td><td>${c.hold?'held':'charged'}</td><td>${c.flips?'<b>changes it</b>':'<span class="mu">no change</span>'}</td></tr>`).join('')+'</table>':'')
  +'<p style="margin-bottom:2px"><b>Decision replay</b></p>'+(rp.possible?`<div style="font-size:13px">${ok(rp.evidence_intact)} Stored evidence is intact (hash matches)<br>${ok(rp.matches_original)} Replaying it under policy ${esc(rp.policy_version_original)} gives the original decision<br>${ok(rp.current_policy_gives_same)} Today's policy (${esc(rp.policy_version_now)}) gives the same decision${rp.current_policy_gives_same?'':' (it would '+rp.current_decision+')'}</div><p class="mu" style="font-size:12px">${esc(rp.note)}</p>`:`<p class="mu">${esc(rp.note)}</p>`)}catch(e){w.innerHTML='<h2>Why was this decided?</h2><p class="mu">'+esc(e.message)+'</p>'}}
+async function verifyOrder(id){const t=$('#truth');t.style.display='block';t.innerHTML='<h2>Payment truth</h2><p class="mu">Asking PayPal...</p>';t.scrollIntoView({behavior:'smooth',block:'nearest'});
+ try{const r=await api('/api/orders/'+id+'/verify'),tick=v=>v?'<span style="color:var(--ok)">&#10003;</span>':'<span style="color:var(--bad)">&#10007;</span>',c=r.match?'var(--ok)':'var(--bad)';
+ t.innerHTML=`<h2>Payment truth <span class="pill" style="border-color:${c};color:${c}">${r.match?'matches PayPal':'MISMATCH'}</span></h2><p class="mu" style="font-size:12px">Order ${esc(r.order_id)}. PayPal was asked just now; this is its answer, not ours.</p>
+ <table class="pt"><tr><th></th><th>Our record</th><th>PayPal says</th><th></th></tr>`+r.checks.map(k=>`<tr><td>${esc(k.field)}</td><td>${esc(k.ours)}</td><td>${esc(k.paypal)}</td><td>${tick(k.ok)}</td></tr>`).join('')+`</table><p>${esc(r.verdict)}</p>`+(r.match?'':`<button class="p" id="recbtn">Reconcile with PayPal</button>`);
+ const rb=$('#recbtn');if(rb)rb.onclick=()=>twoStep(rb,'Click again to reconcile',()=>reconcileOrder(id))}catch(e){t.innerHTML='<h2>Payment truth</h2><p class="mu">'+esc(e.message)+'</p>'}}
+async function reconcileOrder(id){try{const x=await api('/api/orders/'+id+'/reconcile','POST');toast('Reconciled: '+x.outcome+' (order is now '+x.status+')');await load();verifyOrder(id)}catch(e){toast(e.message)}}
+async function loadLedger(){const r=await api('/api/ledger?limit=8'),v=r.verification;
+ $('#ledger').innerHTML=`<p style="margin:0 0 6px"><span class="pill" style="border-color:${v.ok?'var(--ok)':'var(--bad)'};color:${v.ok?'var(--ok)':'var(--bad)'}">${v.ok?'chain intact':'CHAIN BROKEN'}</span> <span class="mu" style="font-size:12px">${v.count} events. Head ${esc(v.head.slice(0,16))}</span></p>`
+ +(v.ok?'':`<p style="color:var(--bad);font-size:13px">${v.problems.map(esc).join('<br>')}</p>`)
+ +'<ul class="tl">'+r.events.map(e=>`<li><i></i><span class="mu" style="flex:none">#${e.seq} ${esc(e.ts.slice(5,16).replace('T',' '))}</span><span>${esc(e.op)} <span class="mu">${esc(e.actor)}${e.ref?' | '+esc(String(e.ref).slice(0,22)):''}</span></span></li>`).join('')+'</ul>'
+ +'<p class="mu" style="font-size:12px">Each event stores the hash of the one before it, so editing or removing an earlier event breaks the chain. Cutting events off the end cannot be detected from inside the database, so note the head hash somewhere outside.</p>'}
 $('#seed').onclick=async()=>{try{await api('/api/demo/seed','POST');toast('Demo data loaded');load()}catch(e){toast(e.message)}};
 $('#reset').onclick=e=>twoStep(e.target,'Click again to wipe',async()=>{try{await api('/api/demo/reset','POST');$('#detail').innerHTML='<h2>Case detail</h2><p class="mu">Select a case.</p>';toast('Demo reset');load()}catch(err){toast(err.message)}});
 $('#detect').onclick=async()=>{try{await api('/api/detect','POST');toast('Detection complete');load()}catch(e){toast(e.message)}};

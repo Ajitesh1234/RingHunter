@@ -78,6 +78,18 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class LedgerEvent(Base):  # append-only, hash-chained audit log
+    __tablename__ = "ledger"
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    ts: Mapped[str] = mapped_column(String)
+    actor: Mapped[str] = mapped_column(String)
+    op: Mapped[str] = mapped_column(String)
+    ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    prev_hash: Mapped[str] = mapped_column(String)
+    hash: Mapped[str] = mapped_column(String)
+
+
 class Decision(Base):  # the evidence and policy behind each screening decision, kept so it can be replayed
     __tablename__ = "decisions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

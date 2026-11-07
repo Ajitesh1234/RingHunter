@@ -671,3 +671,166 @@ def test_oversized_snapshots_report_the_limit_instead_of_faking_a_replay(monkeyp
         assert out["replay"]["possible"] is False and "cannot be replayed" in out["replay"]["note"] and out["counterfactuals"] == []
     finally:
         c.__exit__(None, None, None)
+
+
+# ---------------- payment truth: unknown outcomes, reconcile, verify, refunds, ledger, export ----------------
+def _pending_order(tag, status="pending_review"):
+    from app.db import SessionLocal, Account, Txn, Order, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id=f"{tag}A", device_id=f"{tag}dev", ip="1.1.1.1", shipping_address=f"{tag} st"))
+    s.merge(Txn(id=f"auth:{tag}AU", account_id=f"{tag}A", ts="2026-11-06T10:00:00", amount=25.0))
+    s.merge(Order(id=f"ORD{tag}", account_id=f"{tag}A", auth_id=f"{tag}AU", amount=25.0, ts="2026-11-06T10:00:00", status=status))
+    s.commit()
+    return s, f"ORD{tag}"
+
+
+def _pp_order(auth=None, cap=None, cap_id="CAPX", amount="25.00"):
+    pay = {}
+    if auth:
+        pay["authorizations"] = [{"id": "AU", "status": auth}]
+    if cap:
+        pay["captures"] = [{"id": cap_id, "status": cap}]
+    return {"status": "COMPLETED", "purchase_units": [{"amount": {"value": amount}, "payments": pay}]}
+
+
+def test_a_capture_with_no_answer_is_unknown_not_failed_and_reconciles_from_paypal(monkeypatch):
+    from app import paypal
+    from app.db import SessionLocal, Txn
+    _, oid = _pending_order("UK1")
+    def silent(a): raise paypal.PayPalUnknown("no answer")
+    monkeypatch.setattr(paypal, "capture_authorization", silent)
+    with TestClient(app) as c:
+        r = c.post(f"/api/orders/{oid}/capture")
+        assert r.status_code == 202 and r.json()["status"] == "outcome_unknown"
+        assert c.post(f"/api/orders/{oid}/capture").status_code == 409          # never retry blind
+        assert c.post(f"/api/orders/{oid}/void").status_code == 409
+        monkeypatch.setattr(paypal, "get_order", lambda o: _pp_order(auth="CAPTURED", cap="COMPLETED", cap_id="CAPUK1"))
+        rec = c.post(f"/api/orders/{oid}/reconcile").json()
+        assert rec["outcome"] == "captured" and rec["status"] == "captured"
+        assert {o["id"]: o for o in c.get("/api/orders").json()}[oid]["capture_id"] == "CAPUK1"
+        assert SessionLocal().get(Txn, "CAPUK1").capture_id == "CAPUK1"          # the money is now in our books
+        assert c.post(f"/api/orders/{oid}/reconcile").json()["outcome"] == "captured"   # idempotent
+
+
+def test_reconcile_settles_a_void_and_a_still_authorized_order_from_paypals_answer(monkeypatch):
+    from app import paypal
+    _, voided = _pending_order("UK2", "outcome_unknown")
+    _, still = _pending_order("UK3", "outcome_unknown")
+    monkeypatch.setattr(paypal, "get_order", lambda o: _pp_order(auth="VOIDED") if o == voided else _pp_order(auth="CREATED"))
+    with TestClient(app) as c:
+        assert c.post(f"/api/orders/{voided}/reconcile").json()["status"] == "voided"
+        r = c.post(f"/api/orders/{still}/reconcile").json()
+        assert r["outcome"] == "still_authorized" and r["status"] == "pending_review"     # back in the merchant's hands
+
+
+def test_verify_compares_our_record_with_paypal_field_by_field_and_is_rate_limited(monkeypatch):
+    import time as _t
+    from app import main as app_main, paypal
+    from app.db import SessionLocal, Txn, Order
+    s, held = _pending_order("VF1")
+    _, voided = _pending_order("VF2", "voided")
+    _, cap = _pending_order("VF3", "captured")
+    s.merge(Txn(id="CAPVF3", account_id="VF3A", ts="2026-11-06T10:00:00", amount=25.0, capture_id="CAPVF3", refunded=0))
+    s.get(Order, cap).capture_id = "CAPVF3"
+    s.commit()
+    views = {held: _pp_order(auth="CREATED"), voided: _pp_order(auth="CREATED"), cap: _pp_order(auth="CAPTURED", cap="COMPLETED", cap_id="CAPVF3")}
+    monkeypatch.setattr(paypal, "get_order", lambda o: views[o])
+    with TestClient(app) as c:
+        assert c.get(f"/api/orders/{held}/verify").json()["match"] is True
+        bad = c.get(f"/api/orders/{voided}/verify").json()                       # we say voided, PayPal still says authorized
+        assert bad["match"] is False and bad["checks"][0]["ok"] is False
+        assert c.get(f"/api/orders/{cap}/verify").json()["match"] is True
+        views[cap] = _pp_order(auth="CAPTURED", cap="COMPLETED", cap_id="CAPVF3", amount="99.00")
+        assert c.get(f"/api/orders/{cap}/verify").json()["match"] is False        # a different amount is caught
+        s.get(Txn, "CAPVF3").refunded = 1
+        s.commit()
+        views[cap] = _pp_order(auth="CAPTURED", cap="REFUNDED", cap_id="CAPVF3")
+        assert c.get(f"/api/orders/{cap}/verify").json()["match"] is True         # refunded on both sides
+        app_main._verify_log[:] = [_t.time()] * 30
+        assert c.get(f"/api/orders/{held}/verify").status_code == 429
+        app_main._verify_log[:] = []
+
+
+def test_a_refund_that_gets_no_answer_records_nothing_and_is_safe_to_retry(monkeypatch):
+    from sqlalchemy import select
+    from app import engine as eng, paypal
+    from app.db import SessionLocal, Account, Txn, ActionLog, init_db
+    init_db()
+    s = SessionLocal()
+    for i in (1, 2):
+        s.merge(Account(id=f"RFD{i}", device_id="rfd-dev", ip=f"6.6.6.{i}", shipping_address=f"{i} rd"))
+        s.merge(Txn(id=f"REALCAP-RFD{i}", account_id=f"RFD{i}", ts=f"2026-11-06T11:0{i}:00", amount=25.0, capture_id=f"REALCAP-RFD{i}"))
+    s.commit()
+    eng.detect(s)
+    monkeypatch.setattr(paypal, "enabled", lambda: True)
+    with TestClient(app) as c:
+        case = [x for x in c.get("/api/cases").json() if set(x["cluster"]["cluster_members"]) == {"RFD1", "RFD2"}][0]
+        cf = c.post(f"/api/cases/{case['id']}/investigate").json()["casefile"]
+        idx = [r["action"] for r in cf["recommendations"]].index("refund_transactions")
+        def silent(cap, request_id=None): raise paypal.PayPalUnknown("no answer")
+        monkeypatch.setattr(paypal, "refund_capture", silent)
+        r = c.post(f"/api/cases/{case['id']}/approve", json={"recommendation_index": idx})
+        assert r.status_code == 502 and "idempotency" in r.json()["detail"]
+        s2 = SessionLocal()
+        assert s2.get(Txn, "REALCAP-RFD1").refunded == 0                           # nothing marked refunded
+        assert s2.scalars(select(ActionLog).where(ActionLog.case_id == case["id"])).first() is None   # and nothing recorded as done
+        seen = []
+        monkeypatch.setattr(paypal, "refund_capture", lambda cap, request_id=None: seen.append((cap, request_id)) or {"id": "RF-" + cap})
+        ok = c.post(f"/api/cases/{case['id']}/approve", json={"recommendation_index": idx}).json()
+        assert len(ok["details"]) == 2 and all(req.startswith("rh-") for _, req in seen)   # retried with the same key scheme
+
+
+def test_ledger_chain_detects_edits_deletions_and_reordering():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app import ledger
+    from app.db import Base, LedgerEvent
+    from sqlalchemy.pool import StaticPool
+    mem = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)   # an isolated in-memory database
+    Base.metadata.create_all(mem)
+    s = sessionmaker(mem, expire_on_commit=False)()
+    for i in range(5):
+        ledger.append(s, "system", "test.op", f"ref{i}", {"i": i})
+    v = ledger.verify(s)
+    assert v["ok"] and v["count"] == 5 and len(v["head"]) == 64
+    row = s.get(LedgerEvent, 3)
+    original, row.payload_json = row.payload_json, '{"i":99}'
+    s.commit()
+    v = ledger.verify(s)
+    assert not v["ok"] and any("#3" in p and "edited" in p for p in v["problems"])
+    row.payload_json = original
+    s.commit()
+    assert ledger.verify(s)["ok"]
+    s.delete(s.get(LedgerEvent, 2))
+    s.commit()
+    v = ledger.verify(s)
+    assert not v["ok"] and any("gap" in p for p in v["problems"])
+    s.close()
+    mem.dispose()                                                                 # leave nothing behind for later tests
+
+
+def test_ledger_records_the_flow_and_the_case_export_is_self_contained(monkeypatch):
+    c, t1, t2 = _ring_orders(monkeypatch, "LG")
+    try:
+        led = c.get("/api/ledger?limit=50").json()
+        assert led["verification"]["ok"] is True
+        ops = {(e["op"], e["ref"]) for e in led["events"]}
+        assert ("decision", t2) in ops and ("order.held", t2) in ops and ("order.captured", t1) in ops
+        case = [x for x in c.get("/api/cases").json() if "LGP2" in x["cluster"]["cluster_members"]][0]
+        r = c.get(f"/api/cases/{case['id']}/export")
+        body = r.json()
+        assert "attachment" in r.headers["content-disposition"] and body["ledger_verification"]["ok"] is True
+        by_order = {d["order_id"]: d for d in body["decisions"]}              # other tests share the database, so a case can hold more
+        assert {t1, t2} <= set(by_order) and by_order[t2]["replay"]["possible"] and by_order[t2]["decision"] == "HOLD"
+        assert any(e["op"] == "order.held" for e in body["ledger_events"])
+        assert "explain-LG" not in r.text                                          # raw device identifiers are hashed, not exported
+    finally:
+        c.__exit__(None, None, None)
+
+
+def test_dashboard_has_the_payment_truth_ledger_and_export_controls():
+    with TestClient(app) as c:
+        page = c.get("/dashboard").text
+        for needle in ("Payment truth", "Audit ledger", "Reconcile with PayPal", "Download evidence package", "/api/ledger", "verifyOrder"):
+            assert needle in page, needle

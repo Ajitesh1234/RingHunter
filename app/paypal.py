@@ -11,6 +11,11 @@ class PayPalError(Exception):
     pass
 
 
+class PayPalUnknown(PayPalError):
+    """The request went out but no answer came back (timeout, dropped connection). The outcome is UNKNOWN, not a failure:
+    the money may or may not have moved, so the caller must reconcile with PayPal instead of assuming either way."""
+
+
 def enabled() -> bool:
     return bool(settings.paypal_client_id and settings.paypal_secret)
 
@@ -18,8 +23,11 @@ def enabled() -> bool:
 def _token() -> str:
     if _tok["v"] and time.time() < _tok["exp"] - 30:
         return _tok["v"]
-    r = httpx.post(f"{BASE}/v1/oauth2/token", auth=(settings.paypal_client_id, settings.paypal_secret),
-                   data={"grant_type": "client_credentials"}, timeout=20)
+    try:
+        r = httpx.post(f"{BASE}/v1/oauth2/token", auth=(settings.paypal_client_id, settings.paypal_secret),
+                       data={"grant_type": "client_credentials"}, timeout=20)
+    except httpx.TransportError as e:  # nothing was sent that matters yet, so this is a plain failure
+        raise PayPalError(f"could not authenticate with PayPal ({type(e).__name__})")
     if r.status_code >= 400:
         raise PayPalError(r.text)
     d = r.json()
@@ -31,7 +39,10 @@ def _call(method: str, path: str, body: dict | None = None, request_id: str | No
     headers = {"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"}
     if request_id:
         headers["PayPal-Request-Id"] = request_id  # PayPal-side idempotency
-    r = httpx.request(method, f"{BASE}{path}", json=body, headers=headers, timeout=30)
+    try:
+        r = httpx.request(method, f"{BASE}{path}", json=body, headers=headers, timeout=30)
+    except httpx.TransportError as e:
+        raise PayPalUnknown(f"no answer from PayPal ({type(e).__name__}); the outcome is unknown")
     if r.status_code >= 400:
         raise PayPalError(f"{r.status_code} {r.text}")
     return r.json() if r.content else {}

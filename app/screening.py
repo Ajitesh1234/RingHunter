@@ -5,7 +5,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
-from . import detection_core as core, engine as eng, paypal, policy as policy_mod
+from . import detection_core as core, engine as eng, ledger, paypal, policy as policy_mod
 from .db import Txn, Order, Account, Decision
 from .investigator import split_members
 
@@ -79,6 +79,8 @@ def record_decision(s, order_id, account_id, accounts, txns):
                    policy_json=_canon(pol), inputs_json=blob, inputs_sha256=hashlib.sha256(blob.encode()).hexdigest() if blob else None,
                    result_json=_canon(result)))
     s.commit()
+    ledger.append(s, "system", "decision", order_id, {"hold": result["hold"], "kind": result["kind"], "score": result.get("score"),
+                                                      "policy": pol["version"], "evidence_sha256": (hashlib.sha256(blob.encode()).hexdigest() if blob else None)})
     return result
 
 
@@ -149,6 +151,64 @@ def explain(s, order_id):
     if not intact:
         out["replay"]["matches_original"] = False
     return out
+
+
+def _paypal_view(data):
+    """What PayPal says about an order's money, from one GET on the order."""
+    pu = (data.get("purchase_units") or [{}])[0]
+    pay = pu.get("payments") or {}
+    auths, caps = pay.get("authorizations") or [], pay.get("captures") or []
+    return {"order": data.get("status"), "authorization": auths[0].get("status") if auths else None,
+            "capture": caps[0].get("status") if caps else None, "capture_id": caps[0].get("id") if caps else None,
+            "amount": (pu.get("amount") or {}).get("value")}
+
+
+def reconcile(s, o: Order):
+    """Settle an order whose outcome we could not confirm, using PayPal's answer as the truth."""
+    v = _paypal_view(paypal.get_order(o.id))
+    if v["capture"] in ("COMPLETED", "PENDING", "PARTIALLY_REFUNDED", "REFUNDED") and v["capture_id"]:
+        cid = v["capture_id"]
+        pending = s.get(Txn, f"auth:{o.auth_id}")
+        ts = pending.ts if pending else o.ts
+        if pending:
+            s.delete(pending)
+            s.flush()
+        if not s.get(Txn, cid):
+            s.add(Txn(id=cid, account_id=o.account_id, ts=ts, amount=o.amount, capture_id=cid, refunded=1 if v["capture"] == "REFUNDED" else 0))
+        o.capture_id, o.status = cid, "captured"
+        return "captured", v
+    if v["authorization"] == "VOIDED":
+        o.status = "voided"
+        return "voided", v
+    if v["authorization"] in ("CREATED", "PENDING"):
+        o.status, o.reason = "pending_review", ((o.reason or "") + " Reconciled with PayPal: still authorized, nothing captured.").strip()
+        return "still_authorized", v
+    return "unresolved", v
+
+
+def verify(s, o: Order):
+    """Compare our record of an order with PayPal's, field by field."""
+    v = _paypal_view(paypal.get_order(o.id))
+    refunded = bool(o.capture_id and (s.get(Txn, o.capture_id) or Txn(refunded=0)).refunded)
+    ours_state = {"pending_review": "authorized, not captured", "authorized": "authorized, not captured", "voided": "voided",
+                  "captured": "captured, then refunded" if refunded else "captured"}.get(o.status, o.status)
+    if o.status in ("pending_review", "authorized"):
+        ok = v["authorization"] in ("CREATED", "PENDING") and not v["capture"]
+    elif o.status == "voided":
+        ok = v["authorization"] == "VOIDED" and not v["capture"]
+    elif o.status == "captured":
+        ok = (v["capture"] in ("REFUNDED", "PARTIALLY_REFUNDED")) if refunded else (v["capture"] in ("COMPLETED", "PENDING"))
+    else:
+        ok = False   # outcome_unknown, capturing, voiding: not settled, so it cannot match yet
+    theirs = f"authorization {v['authorization'] or 'none'}" + (f", capture {v['capture']}" if v["capture"] else "")
+    checks = [{"field": "Money state", "ours": ours_state, "paypal": theirs, "ok": ok},
+              {"field": "Amount", "ours": f"{o.amount:.2f}", "paypal": str(v["amount"]), "ok": str(v["amount"]) in (f"{o.amount:.2f}", f"{o.amount}")}]
+    if o.capture_id or v["capture_id"]:
+        checks.append({"field": "Capture ID", "ours": o.capture_id or "none", "paypal": v["capture_id"] or "none", "ok": (o.capture_id or None) == (v["capture_id"] or None)})
+    match = all(c["ok"] for c in checks)
+    return {"order_id": o.id, "match": match, "checks": checks, "paypal": v,
+            "verdict": "Our record and PayPal agree." if match else
+                       "Our record and PayPal disagree, or the outcome is still unsettled. Use Reconcile to settle it from PayPal's answer."}
 
 
 def capture_order(s, o: Order):
