@@ -16,3 +16,32 @@
 - **Deployment** (Render, Postgres), documentation, and the automated test suite.
 
 ## Commit history (generated from git)
+- 2026-10-28  Initial RingHunter scaffold
+- 2026-10-28  Lock closed cases from re-investigation
+- 2026-10-29  Restore main.py; live PayPal sandbox checkout verified
+- 2026-10-29  Supersede grown cases; drop fake signup signal; device override for demos
+- 2026-10-30  Core vs peripheral members; block held payers before capture
+- 2026-10-31  Render deployment config, Postgres support, lifespan startup
+- 2026-10-31  Dispute handler: store, link to rings, draft and submit evidence
+- 2026-10-31  Evidence note never claims shipping without tracking
+- 2026-10-31  Groq gpt-oss investigator with guardrails, fallbacks, calibrated wording
+- 2026-10-31  Dashboard with AG Grid and ring graph; admin token on state-changing endpoints
+- 2026-11-01  Dashboard theme fixes and demo reset
+- 2026-11-01  Per-action approval state; optional refund offer; more-info keeps case open
+- 2026-11-02  README for hackathon submission
+- 2026-11-02  Pre-capture screening: authorize, screen, capture or void; orders panel
+- 2026-11-02  Sticky account identifiers
+- 2026-11-02  Dashboard: in-page confirmations, visible messages
+- 2026-11-02  Dashboard: readable errors, inline status line
+- 2026-11-02  Self-test panel, device-spread rule, README update
+- 2026-11-02  Dashboard: Captured is net of refunds; add Refunded tile
+- 2026-11-03  No-login replay walkthrough
+- 2026-11-03  AI red team; fix chain scenario in self-test
+- 2026-11-04  Design polish, activity timeline, red-team quota limits
+- 2026-11-04  README: PayPal toolkit decision
+- 2026-11-04  PayPal Agent Toolkit for the analyst's read-only lookups
+- 2026-11-05  Payment integrity: server price, checkout binding, atomic orders, fail-closed admin; docs
+- 2026-11-05  Add dated commit history
+- 2026-11-06  Replayable, explainable decisions with provenance and counterfactuals
+- 2026-11-08  Payment truth: verify, reconcile, safe refunds, audit ledger, evidence export
+- 2026-11-11  Add dispute workflows and evaluation improvements
