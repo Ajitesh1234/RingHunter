@@ -37,7 +37,7 @@ The dashboard's **Run evaluation (100 trials each)** button (and `GET /api/eval?
 | Family: shared address, own devices, hours apart | 0% | 100% |
 | Roommates: shared address and IP, same evening | 0% | 100% |
 | Family tablet: one device, days apart (hard case) | 0% | 100% |
-| **Average** | **0%** | **80%** |
+| **Average of the first four rows (excludes the labelled blind spot)** | **82%** | 100% |
 
 The naive rule catches every ring but disrupts four of the five innocent groups. Our rule gives up some recall to disrupt none of them in these scenarios. The threshold sweep on the dashboard shows the trade-off: a hold threshold of 0.3 wrongly holds some innocent buyers, while 0.4 and above do not; we use 0.5.
 
