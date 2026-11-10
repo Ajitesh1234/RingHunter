@@ -19,21 +19,29 @@ Small merchants lose money to rings of accounts that share devices and addresses
 7. **Disputes connected.** Verified PayPal dispute webhooks are stored and linked to the buyer, show whether they belong to a ring, and the merchant can send evidence to PayPal after approval.
 
 ## Does it work? (self-test)
-The dashboard has a **Self-test** button (and `GET /api/eval`). It generates synthetic rings and innocent look-alikes and replays them through the same hold rule the live checkout uses. 20 deterministic trials per scenario:
+The dashboard's **Run evaluation (100 trials each)** button (and `GET /api/eval?seeds=100`) generates synthetic rings and innocent look-alikes and replays them through the same hold rule the live checkout uses. The dashboard uses random draws that were not looked at while tuning the rule, and it also runs a **naive baseline**: "hold anyone who shares anything with a flagged account". Numbers below are from 100 trials per scenario on those unseen draws (the dashboard also shows 95% confidence intervals and a threshold sweep):
 
-| Scenario | Follow-up buyers blocked |
-|---|---|
-| Same device, buying within minutes | 100% |
-| Same device + shared address, within minutes | 100% |
-| Same device, spread over days | 66% (was 0% before we added the device-spread rule) |
-| Chain: neighbours share a device or address | 56% |
-| Rotating devices, shared address only | 0% (known blind spot; address alone is deliberately too weak to hold anyone) |
+| Scenario | Follow-up buyers blocked (ours) | Naive baseline |
+|---|---|---|
+| Same device, buying within minutes | 100% | 100% |
+| Same device + shared address, within minutes | 100% | 100% |
+| Same device, spread over days | 71% (was 0% before we added the device-spread rule) | 100% |
+| Chain: neighbours share a device or address | 57% | 100% |
+| Rotating devices, shared address only | 0% (known blind spot; address alone is deliberately too weak to hold anyone) | 100% |
+| **Average** | **82%** | 100% |
 
-| Innocent look-alike | Groups with a wrongly held order |
-|---|---|
-| Strangers; office (shared IP); family (shared address); roommates; family tablet (one device, one address, days apart) | 0% in all five |
+| Innocent look-alike | Groups with a wrongly held order (ours) | Naive baseline |
+|---|---|---|
+| Strangers: nothing shared | 0% | 0% |
+| Office: shared IP only | 0% | 100% |
+| Family: shared address, own devices, hours apart | 0% | 100% |
+| Roommates: shared address and IP, same evening | 0% | 100% |
+| Family tablet: one device, days apart (hard case) | 0% | 100% |
+| **Average** | **0%** | **80%** |
 
-(A bug in our first version of the chain scenario made it measure the wrong thing; it was found, fixed and re-run, which moved that row from 44% to 56%.)
+The naive rule catches every ring but disrupts four of the five innocent groups. Our rule gives up some recall to disrupt none of them in these scenarios. The threshold sweep on the dashboard shows the trade-off: a hold threshold of 0.3 wrongly holds some innocent buyers, while 0.4 and above do not; we use 0.5.
+
+(A bug in our first version of the chain scenario made it measure the wrong thing; it was found, fixed and re-run, which moved that row from 44% to about 56%.)
 
 The evaluation exposed that a ring which slows down evaded the timing signal. We added one rule (a device used by 3+ accounts that ship to 3+ different addresses is held for review), and the table shows the before and after. **These are our own synthetic scenarios, not real traffic. The first buyer in a ring can never be blocked, because nothing links them yet.**
 
@@ -97,9 +105,9 @@ Money-moving calls (authorize, capture, void, refund, dispute evidence) use our 
 - **Nothing moves without approval.** State-changing endpoints require an admin token, are idempotent, and every action is logged. Account identifiers are sticky (first-seen device, IP and address are kept), so a returning buyer cannot shake ring links by switching browser.
 
 ## Testing instructions for judges
-- **No login needed:** open `/dashboard#watch`, pick a scenario and press **Replay**. It walks an attack (or an innocent group) through the live hold rule purchase by purchase, in plain language. Then **Run evaluation** for the measured results.
+- **No login needed:** open `/dashboard#watch`, pick a scenario and press **Replay**. It walks an attack (or an innocent group) through the live hold rule purchase by purchase, in plain language. Then **Run evaluation (100 trials each)** for the measured results, and **Let an AI try to break it** for the red team.
 - Open `/dashboard`. Reading is public; actions need the **admin token** given in the Devpost testing-instructions field (sandbox only).
-- Click **Run evaluation** to see the self-test. Click **Load demo data** for a ready-made ring, then **Investigate with AI analyst**.
+- Click **Load demo data** for a ready-made ring, then **Investigate with AI analyst**.
 - To make a live ring, buy at `/?device=ring1` with sandbox buyers (credentials in the Devpost field). The first buyer is charged; later buyers on the same device are held and appear under **Orders held for review**. Try **Void** and **Capture**.
 - Approve an action. Refunds are real PayPal sandbox refunds. Try buying again as a held buyer: the order is declined before capture.
 
