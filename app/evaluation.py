@@ -1,6 +1,8 @@
 """Self-evaluation: attack our own screening with synthetic rings and innocent look-alikes, and report the results.
 Runs entirely in memory (no database, no PayPal). It replays purchases in time order, exactly like the live checkout:
 after each purchase it runs detection and HOLDS the buyer only if they share a device or card with a flagged ring."""
+import functools
+import math
 import random
 from datetime import datetime, timedelta
 from . import policy as policy_mod
@@ -99,33 +101,85 @@ def replay_story(i: int) -> dict:
     return {"index": i, "title": spec[0], "kind": kind, "steps": steps, "held": held, "prevented_usd": held * PRICE}
 
 
-def run_eval(seeds: int = 20) -> dict:
-    seeds = max(1, min(int(seeds), 40))
+def wilson(k, n, z=1.96):
+    """95% confidence interval for a proportion k/n (Wilson score)."""
+    if n == 0:
+        return 0.0, 0.0
+    p, d = k / n, 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return max(0.0, c - h), min(1.0, c + h)
+
+
+def naive_replay(purchases):
+    """Baseline for comparison: hold anyone who shares ANY attribute (device, address or IP) with an earlier buyer."""
+    return [any(p["device"] == q["device"] or p["addr"] == q["addr"] or p["ip"] == q["ip"] for q in purchases[:i])
+            for i, p in enumerate(purchases)]
+
+
+def _sweep(seeds, offset):
+    """What happens as the hold threshold moves: follow-up ring buyers caught versus innocent buyers wrongly held."""
+    out = []
+    for thr in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+        pol = {**policy_mod.current(), "min_score": thr}
+        caught = base = held_i = buyers_i = 0
+        for k, spec in enumerate(ATTACKS):
+            for s in range(seeds):
+                rng = random.Random(offset + 1000 * k + s)
+                n = rng.randint(3, 6)
+                held = [x["hold"] for x in _replay(_purchases(spec, n, rng, f"w{k}t{s}"), policy=pol)]
+                base, caught = base + n - 1, caught + sum(held[1:])
+        for k, spec in enumerate(INNOCENT):
+            for s in range(seeds):
+                rng = random.Random(offset + 5000 + 1000 * k + s)
+                n = rng.randint(2, 4)
+                held = [x["hold"] for x in _replay(_purchases(spec, n, rng, f"v{k}t{s}"), policy=pol)]
+                buyers_i, held_i = buyers_i + n, held_i + sum(held)
+        out.append({"min_score": thr, "recall_pct": round(100 * caught / base), "false_hold_pct": round(100 * held_i / buyers_i, 1)})
+    return out
+
+
+@functools.lru_cache(maxsize=8)
+def _run_eval(seeds: int, offset: int) -> dict:
     attacks, innocent = [], []
     for k, spec in enumerate(ATTACKS):
-        blocked, before, prevented = [], [], []
+        caught = base = before = naive = 0
+        prevented = 0.0
         for s in range(seeds):
-            rng = random.Random(1000 * k + s)
+            rng = random.Random(offset + 1000 * k + s)
             n = rng.randint(3, 6)
             ps = _purchases(spec, n, rng, f"a{k}t{s}")
             held = replay(ps)
-            blocked.append(sum(held[1:]) / (n - 1))
-            before.append(sum(replay(ps, use_spread=False)[1:]) / (n - 1))
-            prevented.append(PRICE * sum(held[1:]))
-        attacks.append({"name": spec[0], "blocked_pct": round(100 * sum(blocked) / seeds),
-                        "before_spread_rule_pct": round(100 * sum(before) / seeds),
-                        "avg_prevented_usd": round(sum(prevented) / seeds, 2)})
+            base, caught, prevented = base + n - 1, caught + sum(held[1:]), prevented + PRICE * sum(held[1:])
+            before += sum(replay(ps, use_spread=False)[1:])
+            naive += sum(naive_replay(ps)[1:])
+        lo, hi = wilson(caught, base)
+        attacks.append({"name": spec[0], "blocked_pct": round(100 * caught / base), "ci_low": round(100 * lo), "ci_high": round(100 * hi),
+                        "before_spread_rule_pct": round(100 * before / base), "naive_blocked_pct": round(100 * naive / base),
+                        "follow_up_buyers": base, "avg_prevented_usd": round(prevented / seeds, 2)})
     for k, spec in enumerate(INNOCENT):
-        affected = 0
+        affected = naive_aff = 0
         for s in range(seeds):
-            rng = random.Random(5000 + 1000 * k + s)
+            rng = random.Random(offset + 5000 + 1000 * k + s)
             n = rng.randint(2, 4)
-            if any(replay(_purchases(spec, n, rng, f"i{k}t{s}"))):
-                affected += 1
-        innocent.append({"name": spec[0], "groups_affected_pct": round(100 * affected / seeds)})
+            ps = _purchases(spec, n, rng, f"i{k}t{s}")
+            affected += any(replay(ps))
+            naive_aff += any(naive_replay(ps))
+        lo, hi = wilson(affected, seeds)
+        innocent.append({"name": spec[0], "groups_affected_pct": round(100 * affected / seeds), "ci_low": round(100 * lo), "ci_high": round(100 * hi),
+                         "naive_groups_affected_pct": round(100 * naive_aff / seeds), "groups": seeds})
     scored = [a for a in attacks if "blind spot" not in a["name"]]
-    return {"trials_per_scenario": seeds, "attacks": attacks, "innocent": innocent,
-            "summary": {"avg_followup_buyers_blocked_pct": round(sum(a["blocked_pct"] for a in scored) / len(scored)),
-                        "avg_innocent_groups_disrupted_pct": round(sum(i["groups_affected_pct"] for i in innocent) / len(innocent))},
-            "note": "Synthetic scenarios generated by us, replayed through the same detector and hold rule the live checkout uses. "
-                    "The first buyer in a ring can never be blocked. Real traffic will differ. Averages exclude the labelled blind spot."}
+    avg = lambda rows, key: round(sum(r[key] for r in rows) / len(rows))
+    return {"trials_per_scenario": seeds, "draw_offset": offset, "attacks": attacks, "innocent": innocent,
+            "summary": {"avg_followup_buyers_blocked_pct": avg(scored, "blocked_pct"), "avg_innocent_groups_disrupted_pct": avg(innocent, "groups_affected_pct"),
+                        "naive_avg_followup_buyers_blocked_pct": avg(scored, "naive_blocked_pct"),
+                        "naive_avg_innocent_groups_disrupted_pct": avg(innocent, "naive_groups_affected_pct")},
+            "sweep": _sweep(min(seeds, 30), offset),
+            "note": "Synthetic scenarios written by us, replayed through the same decision function the live checkout uses. The first buyer in a ring "
+                    "can never be blocked. Intervals are 95% Wilson. Averages exclude the labelled blind spot. The scenario families are ours, "
+                    "which is why the AI red team exists. Real traffic will differ."}
+
+
+def run_eval(seeds: int = 20, offset: int = 0) -> dict:
+    """offset 0 = the draws used while developing. The dashboard uses a different offset: draws nobody looked at while tuning."""
+    return _run_eval(max(1, min(int(seeds), 100)), int(offset))

@@ -78,6 +78,13 @@ class Event(Base):  # raw verified PayPal webhooks
     payload_json: Mapped[str] = mapped_column(Text)
 
 
+class Appeal(Base):  # a held buyer's note to the merchant ("this is a mistake")
+    __tablename__ = "appeals"
+    order_id: Mapped[str] = mapped_column(String, primary_key=True)
+    note: Mapped[str] = mapped_column(Text)
+    ts: Mapped[str] = mapped_column(String)
+
+
 class LedgerEvent(Base):  # append-only, hash-chained audit log
     __tablename__ = "ledger"
     seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)

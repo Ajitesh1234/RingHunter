@@ -415,7 +415,7 @@ def test_evaluation_is_deterministic_and_honest():
 def test_eval_endpoint_is_public_and_capped():
     with TestClient(app) as c:
         r = c.get("/api/eval", params={"seeds": 999}).json()
-        assert r["trials_per_scenario"] == 40 and r["summary"]["avg_innocent_groups_disrupted_pct"] == 0
+        assert r["trials_per_scenario"] == 100 and r["summary"]["avg_innocent_groups_disrupted_pct"] == 0
 
 
 def test_orders_report_which_captured_payments_were_refunded():
@@ -833,4 +833,87 @@ def test_dashboard_has_the_payment_truth_ledger_and_export_controls():
     with TestClient(app) as c:
         page = c.get("/dashboard").text
         for needle in ("Payment truth", "Audit ledger", "Reconcile with PayPal", "Download evidence package", "/api/ledger", "verifyOrder"):
+            assert needle in page, needle
+
+
+# ---------------- stronger self-test, entity graph, appeal, expiry, dispute panel ----------------
+def test_wilson_interval_is_sane():
+    from app.evaluation import wilson
+    assert wilson(0, 10)[0] == 0.0 and wilson(10, 10)[1] == 1.0 and wilson(0, 0) == (0.0, 0.0)
+    lo, hi = wilson(50, 100)
+    assert lo < 0.5 < hi
+    lo2, hi2 = wilson(500, 1000)
+    assert (hi2 - lo2) < (hi - lo)                                              # more data, tighter interval
+
+
+def test_self_test_reports_intervals_a_naive_baseline_and_a_threshold_sweep():
+    from app.evaluation import run_eval
+    r = run_eval(30, 50000)
+    for a in r["attacks"]:
+        assert a["ci_low"] <= a["blocked_pct"] <= a["ci_high"] and a["follow_up_buyers"] > 0
+    ours, naive = r["summary"], r["summary"]
+    assert ours["avg_innocent_groups_disrupted_pct"] == 0
+    assert naive["naive_avg_innocent_groups_disrupted_pct"] > 50                # holding anyone who shares anything punishes honest groups
+    assert any(i["naive_groups_affected_pct"] == 100 and i["groups_affected_pct"] == 0 for i in r["innocent"])
+    sweep = r["sweep"]
+    assert [w["min_score"] for w in sweep] == sorted(w["min_score"] for w in sweep)
+    assert all(a["recall_pct"] >= b["recall_pct"] for a, b in zip(sweep, sweep[1:]))                 # stricter threshold never catches more
+    assert all(a["false_hold_pct"] >= b["false_hold_pct"] for a, b in zip(sweep, sweep[1:]))
+    assert {w["min_score"]: w for w in sweep}[0.5]["false_hold_pct"] == 0.0     # our operating point wrongly holds nobody here
+    assert run_eval(30, 50000) == r                                             # deterministic
+
+
+def test_cases_carry_the_shared_identifiers_for_the_graph():
+    with TestClient(app) as c:
+        c.post("/api/demo/seed")
+        case = [x for x in c.get("/api/cases").json() if {"R1", "R2", "R3", "R4"} <= set(x["cluster"]["cluster_members"])][0]
+        kinds = {e["type"] for e in case["entities"]}
+        assert "device" in kinds and all(len(e["members"]) >= 2 and e["label"].split()[0].lower() == e["type"] for e in case["entities"])
+        assert "devA" not in str(case["entities"])                              # neutral labels, not raw identifiers
+
+
+def test_a_held_buyer_can_tell_the_merchant_it_is_a_mistake(monkeypatch):
+    _paypal_env(monkeypatch, {"APL1": ("AP1", 1), "APL2": ("AP2", 2)})
+    with TestClient(app) as c:
+        t1, first = _buy(c, "appeal-ring")
+        t2, second = _buy(c, "appeal-ring")
+        assert "Think this is a mistake" in second.text and "Think this is a mistake" not in first.text
+        assert c.post(f"/api/orders/{t2}/appeal", json={"note": "x" * 501}).status_code == 422          # length is capped
+        assert c.post(f"/api/orders/{t2}/appeal", json={"note": "   "}).status_code in (409, 422)
+        assert c.post(f"/api/orders/{t2}/appeal", json={"note": "I share a laptop with my brother."}).json() == {"received": True}
+        assert {o["id"]: o for o in c.get("/api/orders").json()}[t2]["appeal"] == "I share a laptop with my brother."
+        assert c.post(f"/api/orders/{t1}/appeal", json={"note": "hello"}).status_code == 409           # only orders waiting for review
+        ops = {(e["op"], e["ref"]) for e in c.get("/api/ledger?limit=50").json()["events"]}
+        assert ("order.appeal", t2) in ops
+
+
+def test_stale_holds_are_voided_and_unknown_or_failed_voids_are_handled(monkeypatch):
+    from app import paypal
+    from app.config import settings
+    from app.db import SessionLocal, Account, Txn, Order, init_db
+    init_db()
+    s = SessionLocal()
+    s.merge(Account(id="EXA", device_id="exd", ip="1", shipping_address="a"))
+    for n, ts in (("OLD", "2020-01-01T00:00:00"), ("OLD2", "2020-01-01T00:00:00"), ("OLD3", "2020-01-01T00:00:00"), ("NEW", "2999-01-01T00:00:00")):
+        s.merge(Txn(id=f"auth:EX{n}", account_id="EXA", ts=ts, amount=25.0))
+        s.merge(Order(id=f"EX-{n}", account_id="EXA", auth_id=f"EX{n}", amount=25.0, ts=ts, status="pending_review"))
+    s.commit()
+    def void(a):
+        if a == "EXOLD2": raise paypal.PayPalUnknown("no answer")
+        if a == "EXOLD3": raise paypal.PayPalError("declined")
+        return {}
+    monkeypatch.setattr(paypal, "void_authorization", void)
+    with TestClient(app) as c:
+        r = c.post("/api/maintenance/expire?hours=48").json()
+        assert "EX-OLD" in r["voided"] and "EX-OLD2" in r["outcome_unknown"] and "EX-OLD3" in r["failed"]
+        st = {o["id"]: o["status"] for o in c.get("/api/orders").json()}
+        assert st["EX-OLD"] == "voided" and st["EX-OLD2"] == "outcome_unknown" and st["EX-OLD3"] == "pending_review" and st["EX-NEW"] == "pending_review"
+        monkeypatch.setattr(settings, "admin_token", "tok", raising=False)
+        assert c.post("/api/maintenance/expire").status_code == 401             # state-changing, so it is behind the admin lock
+
+
+def test_dashboard_has_the_dispute_panel_graph_legend_and_appeal_note():
+    with TestClient(app) as c:
+        page = c.get("/dashboard").text
+        for needle in ("Dispute response", "openDispute", "Buyer's note", "shared identifiers", "Naive rule", "Where the threshold sits"):
             assert needle in page, needle

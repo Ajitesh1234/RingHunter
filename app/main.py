@@ -2,7 +2,7 @@ import json
 import time
 import hashlib
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import secrets
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -10,11 +10,11 @@ import uuid
 from fastapi import FastAPI, Request, HTTPException, Depends, Security
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from . import paypal, engine as eng, investigator, disputes as dsp, llm, screening, evaluation, redteam, paypal_tools, ledger
 from .config import settings
-from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, Decision, now
+from .db import init_db, SessionLocal, Account, Txn, Case, ActionLog, Blocked, Event, Dispute, Order, Checkout, Decision, Appeal, now
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -99,7 +99,7 @@ body:JSON.stringify({device_id:d})});const j=await r.json();
 if(j.approve_url)location=j.approve_url;else{m.textContent=JSON.stringify(j);b.disabled=false;b.textContent='Pay with PayPal'}}</script></body></html>""".replace("__ICON__", ICON).replace("__CSS__", BASE_CSS)
 
 
-def _result_page(kind, headline, detail=""):
+def _result_page(kind, headline, detail="", extra=""):
     """Plain, readable result page for the buyer after PayPal returns them to the store."""
     color = {"ok": "var(--ok)", "hold": "var(--warn)", "no": "var(--bad)"}[kind]
     mark = {"ok": "&#10003;", "hold": "&#8987;", "no": "&#10005;"}[kind]
@@ -108,7 +108,7 @@ def _result_page(kind, headline, detail=""):
             f'.box{{max-width:460px;margin:12vh auto;background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:30px;text-align:center}}'
             f'.m{{width:54px;height:54px;border-radius:50%;margin:0 auto 14px;background:{color};color:#fff;font-size:28px;line-height:54px}}'
             f'a{{color:var(--ac)}}</style></head><body><div class="box"><div class="m">{mark}</div><h2>{headline}</h2>'
-            f'<p class="mu">{detail}</p><p><a href="/">Back to the store</a> &middot; <a href="/dashboard">Merchant dashboard</a></p></div></body></html>')
+            f'<p class="mu">{detail}</p>{extra}<p><a href="/">Back to the store</a> &middot; <a href="/dashboard">Merchant dashboard</a></p></div></body></html>')
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -133,6 +133,19 @@ def checkout_create(body: CreateIn, request: Request, s=Depends(db)):
     return o
 
 
+def _appeal_form(oid):
+    """Shown to a held buyer: a way to tell the merchant this is a mistake."""
+    import html
+    o = html.escape(str(oid), quote=True)
+    return ('<div style="margin-top:16px;text-align:left"><label class="mu">Think this is a mistake? Tell the seller (optional):</label>'
+            '<textarea id="n" maxlength="500" rows="3" style="width:100%;margin:6px 0;font:inherit;background:var(--bg);color:var(--tx);'
+            'border:1px solid var(--bd);border-radius:8px;padding:8px"></textarea>'
+            '<button id="sb" style="font:inherit;padding:8px 14px;border-radius:8px;border:0;background:var(--ac);color:var(--bg);cursor:pointer">Send note</button>'
+            '<p id="sm" class="mu"></p></div><script>sb.onclick=async()=>{const r=await fetch("/api/orders/' + o + '/appeal",{method:"POST",'
+            'headers:{"Content-Type":"application/json"},body:JSON.stringify({note:n.value})});'
+            'sm.textContent=r.ok?"Thanks. The seller will see your note.":"Could not send your note."}</script>')
+
+
 def _order_problem(order, ck):
     """Does the PayPal order match the checkout we started? Returns a reason string if not."""
     if not settings.strict_order_check:
@@ -155,7 +168,7 @@ def _already_processed(s, token):
     if o and o.status == "captured":
         return _result_page("ok", "Thanks, payment received.", "This order was already processed.")
     if o and o.status == "pending_review":
-        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "This order was already processed.")
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "This order was already processed.", _appeal_form(token))
     return _result_page("no", "This order was already processed.", "Nothing further was done.")
 
 
@@ -236,7 +249,7 @@ def activity(s=Depends(db)):
 @app.get("/api/eval")
 def run_evaluation(seeds: int = 20):
     """Attacks our own screening with synthetic rings and innocent look-alikes. Read-only, in memory, no PayPal calls."""
-    return evaluation.run_eval(seeds)
+    return evaluation.run_eval(seeds, offset=50000)   # fresh draws, not the ones used while developing
 
 
 @app.get("/api/replay")
@@ -285,7 +298,7 @@ def _screened_checkout(s, request, token, dev):
         o.status, o.reason, o.case_id = "pending_review", reason, case_id
         s.commit()
         ledger.append(s, "system", "order.held", token, {"account": pid, "case": case_id, "reason": reason})
-        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.")
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.", _appeal_form(token))
     try:
         screening.capture_order(s, o)
     except paypal.PayPalUnknown:
@@ -297,7 +310,7 @@ def _screened_checkout(s, request, token, dev):
         o.status, o.reason = "pending_review", f"Automatic capture failed ({str(e)[:90]}). Review it and capture manually."
         s.commit()
         ledger.append(s, "system", "order.capture_failed", token, {"error": str(e)[:200]})
-        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.")
+        return _result_page("hold", "Thanks. Your order is being reviewed. You have not been charged yet.", "The seller will confirm shortly. Nothing has been taken from your account.", _appeal_form(token))
     s.commit()
     ledger.append(s, "system", "order.captured", token, {"auto": True, "capture_id": o.capture_id})
     eng.detect(s)
@@ -310,9 +323,10 @@ def list_orders(s=Depends(db)):
     rows = list(s.scalars(select(Order).order_by(Order.ts.desc())))
     refunded = {x.id for x in s.scalars(select(Txn).where(Txn.refunded == 1))}
     decided = {d.order_id for d in s.scalars(select(Decision))}
+    appeals = {a.order_id: a.note for a in s.scalars(select(Appeal))}
     return [{"id": o.id, "account_id": o.account_id, "amount": o.amount, "ts": o.ts, "status": o.status,
              "reason": o.reason, "case_id": o.case_id, "capture_id": o.capture_id,
-             "refunded": o.capture_id in refunded, "decision_recorded": o.id in decided} for o in rows]
+             "refunded": o.capture_id in refunded, "decision_recorded": o.id in decided, "appeal": appeals.get(o.id)} for o in rows]
 
 
 def _order(s, oid) -> Order:
@@ -329,6 +343,51 @@ def order_explain(oid: str, s=Depends(db)):
     if out is None:
         raise HTTPException(404, "no stored decision for this order (it was screened before decisions were recorded)")
     return out
+
+
+class AppealIn(BaseModel):
+    note: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/orders/{oid}/appeal")
+def order_appeal(oid: str, body: AppealIn, s=Depends(db)):
+    """A held buyer tells the merchant it is a mistake. Only works while the order is waiting for review."""
+    o = _order(s, oid)
+    note = body.note.strip()
+    if o.status != "pending_review" or not note:
+        raise HTTPException(409, "This order is not waiting for review.")
+    s.merge(Appeal(order_id=oid, note=note, ts=now().replace(tzinfo=None).isoformat(timespec="seconds")))
+    s.commit()
+    ledger.append(s, "buyer", "order.appeal", oid, {"characters": len(note)})
+    return {"received": True}
+
+
+@app.post("/api/maintenance/expire", dependencies=[ADMIN])
+def expire_stale(hours: int = 48, s=Depends(db)):
+    """Void orders that have waited for review longer than `hours` (authorizations do not last forever).
+    Meant to be called by a scheduler, for example a Render Cron Job."""
+    cutoff = (now().replace(tzinfo=None) - timedelta(hours=max(1, hours))).isoformat(timespec="seconds")
+    voided, unknown, failed = [], [], []
+    for oid in [x.id for x in s.scalars(select(Order).where(Order.status == "pending_review", Order.ts < cutoff))]:
+        if not _claim(s, oid, ("pending_review",), "voiding"):
+            continue
+        o = s.get(Order, oid)
+        s.refresh(o)
+        try:
+            screening.void_order(s, o)
+        except paypal.PayPalUnknown:
+            _unknown(s, o, "expiry void", "system")
+            unknown.append(oid)
+            continue
+        except paypal.PayPalError:
+            o.status = "pending_review"
+            s.commit()
+            failed.append(oid)
+            continue
+        s.commit()
+        ledger.append(s, "system", "order.expired_voided", oid, {"waited_over_hours": hours})
+        voided.append(oid)
+    return {"voided": voided, "outcome_unknown": unknown, "failed": failed}
 
 
 def _claim(s, oid, from_statuses, to_status):
@@ -512,9 +571,25 @@ def cases(s=Depends(db)):
     return [_out(s, c) for c in s.scalars(select(Case).where(Case.status != "superseded").order_by(Case.score.desc()))]
 
 
+def _entities(s, members):
+    """Shared identifiers inside a case (a device, an address, an IP used by 2+ accounts), with neutral labels, for the graph."""
+    accts = list(s.scalars(select(Account).where(Account.id.in_(members))))
+    out = []
+    for kind, attr in (("device", "device_id"), ("address", "shipping_address"), ("ip", "ip")):
+        groups = {}
+        for a in accts:
+            v = getattr(a, attr)
+            if v:
+                groups.setdefault(v, []).append(a.id)
+        for i, ms in enumerate(x for x in groups.values() if len(x) >= 2):
+            out.append({"type": kind, "label": f"{kind.capitalize()} {chr(65 + i)}", "members": ms})
+    return out
+
+
 def _out(s, c):
     """Case plus the recommendation indexes already approved, so the dashboard can show per-action state."""
     d = c.as_dict()
+    d["entities"] = _entities(s, d["cluster"]["cluster_members"])
     d["done"] = [int(a.key.split(":")[1]) for a in s.scalars(select(ActionLog).where(ActionLog.case_id == c.id))]
     return d
 

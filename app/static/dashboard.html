@@ -44,13 +44,14 @@ select{font:inherit;padding:6px 8px;border-radius:6px;border:1px solid var(--bd)
 <section><div class="card" id="detail"><h2>Case detail</h2><p class="mu">Select a case to see the ring, the analyst's findings, and approve actions.</p></div>
 <div class="card" id="why" style="display:none"></div>
 <div class="card" id="truth" style="display:none"></div>
+<div class="card" id="disp" style="display:none"></div>
 <div class="sec">Proof it works</div>
 <div class="card" id="watch"><h2>Watch an attack get stopped <span class="mu" style="font-weight:400;font-size:12px">(no login needed)</span></h2>
 <p class="mu" style="margin-top:0">Pick a scenario and replay it purchase by purchase through the live hold rule. Synthetic data, no PayPal calls.</p>
 <select id="rs" style="max-width:100%"></select> <button class="p" id="rp">Replay</button><div id="rout" style="margin-top:10px"></div></div>
 <div class="card"><h2>Self-test: we attack our own detector</h2>
 <p class="mu" style="margin-top:0">Replays synthetic rings and innocent look-alikes through the same hold rule the live checkout uses.</p>
-<button class="p" id="runeval">Run evaluation (20 trials each)</button><div id="evalout" style="margin-top:10px"></div></div>
+<button class="p" id="runeval">Run evaluation (100 trials each)</button><div id="evalout" style="margin-top:10px"></div></div>
 <div class="card" id="redteam"><h2>AI red team: a model invents attacks against our detector</h2>
 <p class="mu" style="margin-top:0">We do not write these attacks. A separate model proposes evasion strategies; we replay each one against the live hold rule and report what got through.</p>
 <button class="p" id="rtbtn">Let an AI try to break it</button> <span id="rtmsg" class="mu"></span><div id="rtout" style="margin-top:10px"></div></div></section></main>
@@ -72,7 +73,7 @@ async function api(path,method='GET',body){const h={'Content-Type':'application/
 const split=c=>{const s=new Set();c.edges.forEach(e=>{if(e.shared_attributes.some(a=>STRONG.includes(a)))e.pair.forEach(m=>s.add(m))});return s};
 function mount(el,id,cols,rows,onSel){const box=$(id);
  if(window.agGrid){if(el.g){el.g.setGridOption('rowData',rows);return el.g}
-  el.g=agGrid.createGrid(box,{columnDefs:cols,rowData:rows,rowSelection:'single',defaultColDef:{flex:1,minWidth:90,resizable:true,sortable:true},
+  el.g=agGrid.createGrid(box,{columnDefs:cols,rowData:rows,rowSelection:'single',defaultColDef:{flex:1,minWidth:90,resizable:true,sortable:true,filter:true},
    onRowClicked:e=>onSel&&onSel(e.data)});return el.g}
  box.style.height='auto';box.innerHTML='<table class="pt"><tr>'+cols.map(c=>'<th>'+c.headerName+'</th>').join('')+'</tr>'+
   rows.map((r,i)=>'<tr data-i="'+i+'">'+cols.map(c=>'<td>'+esc(c.valueGetter?c.valueGetter({data:r}):r[c.field])+'</td>').join('')+'</tr>').join('')+'</table>';
@@ -84,13 +85,17 @@ async function load(){loadOrders().catch(()=>{});loadActivity().catch(()=>{});lo
   {headerName:'Decision',valueGetter:p=>p.data.decision.replace('FLAGGED_FOR_','')},{field:'score',headerName:'Score',maxWidth:90},
   {headerName:'Accounts',maxWidth:100,valueGetter:p=>p.data.cluster.cluster_size},{headerName:'Analyst',valueGetter:p=>p.data.casefile?p.data.casefile.analyst:'-'}],CASES,show);
  mount(gD,'#gd',[{field:'id',headerName:'Dispute'},{field:'reason',headerName:'Reason'},{field:'status',headerName:'Status'},
-  {field:'amount',headerName:'USD',maxWidth:80},{headerName:'Ring',valueGetter:p=>p.data.ring?('case '+p.data.ring.case_id+' ('+p.data.ring.role+')'):'-'}],D)}
-function graph(c){const m=c.cluster.cluster_members,core=split(c.cluster),n=m.length,R=n>1?105:0,pos={};
+  {field:'amount',headerName:'USD',maxWidth:80},{headerName:'Ring',valueGetter:p=>p.data.ring?('case '+p.data.ring.case_id+' ('+p.data.ring.role+')'):'-'}],D,openDispute)}
+function graph(c){const m=c.cluster.cluster_members,core=split(c.cluster),n=m.length,ents=c.entities||[],pos={},R=n>1?108:0;
  m.forEach((x,i)=>{const a=2*Math.PI*i/n-Math.PI/2;pos[x]=[160+R*Math.cos(a),135+R*Math.sin(a)]});
- const lines=c.cluster.edges.map(e=>{const [a,b]=e.pair,s=e.shared_attributes.some(x=>STRONG.includes(x));
-  return `<line x1="${pos[a][0]}" y1="${pos[a][1]}" x2="${pos[b][0]}" y2="${pos[b][1]}" stroke="${s?'var(--bad)':'var(--mu)'}" stroke-width="${1+e.edge_weight*3}" ${s?'':'stroke-dasharray="4 4"'}><title>${esc(a+' - '+b+': '+e.shared_attributes.join(', '))}</title></line>`}).join('');
+ const col={device:'var(--bad)',address:'var(--warn)',ip:'var(--mu)'};let lines='',nodes='';
+ if(ents.length){ents.forEach(e=>{const ps=e.members.filter(x=>pos[x]);if(!ps.length)return;
+   const cx=ps.reduce((s,x)=>s+pos[x][0],0)/ps.length,cy=ps.reduce((s,x)=>s+pos[x][1],0)/ps.length,ex=160+(cx-160)*.5,ey=135+(cy-135)*.5,solid=e.type==='device';
+   lines+=ps.map(x=>`<line x1="${ex}" y1="${ey}" x2="${pos[x][0]}" y2="${pos[x][1]}" stroke="${col[e.type]}" stroke-width="${solid?2.4:1.4}" ${solid?'':'stroke-dasharray="4 3"'} opacity=".9"/>`).join('');
+   nodes+=`<g><rect x="${ex-9}" y="${ey-9}" width="18" height="18" rx="3" fill="var(--card)" stroke="${col[e.type]}" stroke-width="2"><title>${esc(e.label)} shared by ${e.members.length} accounts</title></rect><text x="${ex}" y="${ey+3}" text-anchor="middle" font-size="9" font-weight="700" fill="var(--tx)">${e.type[0].toUpperCase()}</text></g>`})}
+ else{lines=c.cluster.edges.map(e=>{const [a,b]=e.pair,s=e.shared_attributes.some(x=>STRONG.includes(x));return `<line x1="${pos[a][0]}" y1="${pos[a][1]}" x2="${pos[b][0]}" y2="${pos[b][1]}" stroke="${s?'var(--bad)':'var(--mu)'}" stroke-width="${1+e.edge_weight*3}" ${s?'':'stroke-dasharray="4 4"'}><title>${esc(a+' - '+b+': '+e.shared_attributes.join(', '))}</title></line>`}).join('')}
  const dots=m.map(x=>`<g><circle cx="${pos[x][0]}" cy="${pos[x][1]}" r="17" fill="${core.has(x)?'var(--bad)':'var(--warn)'}"><title>${esc(x)} (${core.has(x)?'core':'peripheral'})</title></circle><text x="${pos[x][0]}" y="${pos[x][1]+4}" text-anchor="middle" font-size="10" fill="#fff">${esc(x.slice(0,4))}</text></g>`).join('');
- return `<svg viewBox="0 0 320 270" style="display:block;max-width:340px;margin:0 auto" width="100%" role="img" aria-label="Account link graph">${lines}${dots}</svg><div class="mu" style="font-size:12px"><span style="color:var(--bad)">&#9679;</span> core (shared device/card, solid line) &nbsp; <span style="color:var(--warn)">&#9679;</span> peripheral (address/IP only, dashed)</div>`}
+ return `<svg viewBox="0 0 320 270" style="display:block;max-width:340px;margin:0 auto" width="100%" role="img" aria-label="Accounts and the identifiers they share">${lines}${nodes}${dots}</svg><div class="mu" style="font-size:12px"><span style="color:var(--bad)">&#9679;</span> core account &nbsp; <span style="color:var(--warn)">&#9679;</span> peripheral &nbsp; boxes are shared identifiers: <b>D</b> device (solid), <b>A</b> address and <b>I</b> IP (dashed)</div>`}
 function show(c){const f=c.casefile,closed=['actioned','dismissed'].includes(c.status);
  let h=`<h2>Case ${c.id} <span class="pill">${esc(c.status)}</span> <span class="pill">${esc(c.decision.replace('FLAGGED_FOR_',''))} ${c.score}</span></h2>`+graph(c);
  h+=`<p style="margin:4px 0"><a href="/api/cases/${c.id}/export" download="ringhunter-case-${c.id}.json" style="color:var(--ac);font-size:13px">Download evidence package (JSON)</a></p>`;
@@ -106,16 +111,29 @@ const tile=(a,b,c)=>`<div class="tile"><span class="mu">${a}</span><b>${b}</b><s
 async function loadOrders(){const O=await api('/api/orders'),sum=f=>O.filter(f).reduce((a,o)=>a+o.amount,0).toFixed(2);
  $('#tiles').innerHTML=tile('Prevented','$'+sum(o=>o.status==='voided'),'voided before any money moved')+tile('Pending review','$'+sum(o=>o.status==='pending_review'),'authorized, awaiting your decision')+tile('Captured (net)','$'+sum(o=>o.status==='captured'&&!o.refunded),'charged and kept')+tile('Refunded','$'+sum(o=>o.status==='captured'&&o.refunded),'charged, then refunded');
  const P=O.filter(o=>o.status==='pending_review'||o.status==='outcome_unknown');
- $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span><br>${o.status==='outcome_unknown'?`<b style="color:var(--warn)">Outcome unknown: PayPal did not answer.</b> <button class="p" data-r="${esc(o.id)}">Reconcile with PayPal</button> <button data-t="${esc(o.id)}">Verify</button>`:`<button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button> <button data-w="${esc(o.id)}">Why held?</button> <button data-t="${esc(o.id)}">Verify</button>`}</div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
+ $('#pend').innerHTML=P.length?P.map(o=>`<div class="rec"><b>$${o.amount.toFixed(2)}</b> buyer ${esc(o.account_id)}<br><span class="mu">${esc(o.reason||'')}</span>${o.appeal?`<br><b>Buyer's note:</b> ${esc(o.appeal)}`:''}<br>${o.status==='outcome_unknown'?`<b style="color:var(--warn)">Outcome unknown: PayPal did not answer.</b> <button class="p" data-r="${esc(o.id)}">Reconcile with PayPal</button> <button data-t="${esc(o.id)}">Verify</button>`:`<button class="p" data-c="${esc(o.id)}">Capture</button> <button class="d" data-v="${esc(o.id)}">Void</button> <button data-w="${esc(o.id)}">Why held?</button> <button data-t="${esc(o.id)}">Verify</button>`}</div>`).join(''):'<p class="mu">No orders waiting for review.</p>';
  document.querySelectorAll('#pend button').forEach(b=>b.onclick=()=>{if(b.dataset.w)return explainOrder(b.dataset.w);if(b.dataset.t)return verifyOrder(b.dataset.t);if(b.dataset.r)return twoStep(b,'Click again to reconcile',()=>reconcileOrder(b.dataset.r));const cap=!!b.dataset.c,id=b.dataset.c||b.dataset.v;
   twoStep(b,cap?'Click again to capture':'Click again to void',async()=>{try{const x=await api('/api/orders/'+id+'/'+(cap?'capture':'void'),'POST');toast(JSON.stringify(x));load()}catch(e){toast(e.message)}})})}
-async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Running...</p>';
- try{const r=await api('/api/eval?seeds=20');
- const bar=(n,v,c,x)=>`<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px;gap:8px"><span>${esc(n)}</span><b>${v}%${x||''}</b></div><div style="height:8px;background:var(--bd);border-radius:4px"><div style="height:8px;width:${v}%;background:${c};border-radius:4px"></div></div></div>`;
- o.innerHTML=`<p><b>${r.summary.avg_followup_buyers_blocked_pct}%</b> of follow-up ring buyers blocked &nbsp;|&nbsp; <b>${r.summary.avg_innocent_groups_disrupted_pct}%</b> of innocent groups disrupted</p><b>Attacks (higher is better)</b>`
- +r.attacks.map(a=>bar(a.name,a.blocked_pct,'var(--ok)',a.blocked_pct!==a.before_spread_rule_pct?` <span class="mu" style="font-weight:400">(was ${a.before_spread_rule_pct}% before the device-spread rule)</span>`:'')).join('')
- +'<b>Innocent look-alikes (lower is better)</b>'+r.innocent.map(i=>bar(i.name,i.groups_affected_pct,'var(--bad)')).join('')
- +`<p class="mu" style="font-size:12px">${esc(r.note)} ${r.trials_per_scenario} trials per scenario.</p>`}catch(e){o.textContent=e.message}}
+async function runEval(){const o=$('#evalout');o.innerHTML='<p class="mu">Running 100 trials per scenario on fresh draws...</p>';
+ try{const r=await api('/api/eval?seeds=100'),S=r.summary;
+ const bar=(n,v,c,x)=>`<div style="margin:7px 0"><div style="display:flex;justify-content:space-between;font-size:12px;gap:8px"><span>${esc(n)}</span><b>${v}%</b></div><div style="height:8px;background:var(--bd);border-radius:4px"><div style="height:8px;width:${v}%;background:${c};border-radius:4px"></div></div><div class="mu" style="font-size:11px">${x}</div></div>`;
+ o.innerHTML=`<p><b>Ours:</b> ${S.avg_followup_buyers_blocked_pct}% of follow-up ring buyers blocked, ${S.avg_innocent_groups_disrupted_pct}% of innocent groups disrupted.<br><b>Naive rule</b> (hold anyone who shares anything): ${S.naive_avg_followup_buyers_blocked_pct}% blocked, <b>${S.naive_avg_innocent_groups_disrupted_pct}%</b> of innocent groups disrupted.</p><b>Attacks (higher is better)</b>`
+ +r.attacks.map(a=>bar(a.name,a.blocked_pct,'var(--ok)',`95% CI ${a.ci_low}-${a.ci_high}. Naive rule: ${a.naive_blocked_pct}%.${a.blocked_pct!==a.before_spread_rule_pct?' Was '+a.before_spread_rule_pct+'% before the device-spread rule.':''}`)).join('')
+ +'<b>Innocent look-alikes (lower is better)</b>'+r.innocent.map(i=>bar(i.name,i.groups_affected_pct,'var(--bad)',`95% CI ${i.ci_low}-${i.ci_high}. Naive rule: ${i.naive_groups_affected_pct}%.`)).join('')
+ +'<p style="margin-bottom:2px"><b>Where the threshold sits</b> <span class="mu" style="font-size:12px">(hold when the cluster score is at least this)</span></p><table class="pt"><tr><th>Threshold</th><th>Ring buyers caught</th><th>Innocent buyers wrongly held</th></tr>'+r.sweep.map(w=>`<tr${w.min_score===0.5?' style="font-weight:700"':''}><td>${w.min_score}${w.min_score===0.5?' (ours)':''}</td><td>${w.recall_pct}%</td><td>${w.false_hold_pct}%</td></tr>`).join('')+'</table>'
+ +`<p class="mu" style="font-size:12px">${esc(r.note)} ${r.trials_per_scenario} trials per scenario, on draws not used while developing.</p>`}catch(e){o.textContent=e.message}}
+async function openDispute(d){const w=$('#disp');w.style.display='block';w.scrollIntoView({behavior:'smooth',block:'nearest'});
+ w.innerHTML=`<h2>Dispute response <span class="pill">${esc(d.status||'')}</span></h2><p class="mu" style="font-size:13px">${esc(d.id)} | ${esc(d.reason||'')} | $${d.amount} | buyer ${esc(d.account_id||'?')}${d.ring?' | in ring case '+d.ring.case_id+' ('+d.ring.role+')':''}</p>`
+ +(d.evidence_submitted?'<p><b>Evidence already sent to PayPal.</b></p>':`<p class="mu" style="font-size:12px">The note is drafted only from your records. Add real tracking if you have it; without it the note says none is attached.</p>
+ <div style="display:flex;gap:6px;flex-wrap:wrap"><input id="dcar" placeholder="Carrier (e.g. UPS)" size="14"><input id="dtrk" placeholder="Tracking number" size="18"><button id="dre">Redraft</button></div>
+ <textarea id="dnote" rows="5" style="width:100%;margin-top:8px;font:inherit;background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:8px"></textarea>
+ <p style="margin:6px 0"><button class="p" id="dsend">Send evidence to PayPal</button> <span id="dmsg" class="mu"></span></p>`);
+ if(d.evidence_submitted)return;
+ const draft=async()=>{const q=new URLSearchParams();if($('#dcar').value)q.set('carrier',$('#dcar').value);if($('#dtrk').value)q.set('tracking_number',$('#dtrk').value);
+  const r=await api('/api/disputes/'+encodeURIComponent(d.id)+'/draft?'+q);$('#dnote').value=r.notes;$('#dmsg').textContent='Drafted by '+r.source+'.'};
+ try{await draft()}catch(e){$('#dmsg').textContent=e.message}
+ $('#dre').onclick=()=>draft().catch(e=>$('#dmsg').textContent=e.message);
+ const sb=$('#dsend');sb.onclick=()=>twoStep(sb,'Click again to send',async()=>{try{await api('/api/disputes/'+encodeURIComponent(d.id)+'/evidence','POST',{carrier:$('#dcar').value||null,tracking_number:$('#dtrk').value||null,notes:$('#dnote').value});toast('Evidence sent to PayPal');await load();openDispute({...d,evidence_submitted:true})}catch(e){$('#dmsg').textContent=e.message}})}
 $('#runeval').onclick=runEval;
 api('/api/replay').then(r=>{$('#rs').innerHTML=r.scenarios.map((n,i)=>`<option value="${i}">${esc(n)}</option>`).join('')}).catch(()=>{});
 $('#rp').onclick=async()=>{const o=$('#rout');o.innerHTML='';try{const r=await api('/api/replay?i='+$('#rs').value);
