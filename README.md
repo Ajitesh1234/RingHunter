@@ -28,7 +28,7 @@ The dashboard's **Run evaluation (100 trials each)** button (and `GET /api/eval?
 | Same device, spread over days | 71% (was 0% before we added the device-spread rule) | 100% |
 | Chain: neighbours share a device or address | 57% | 100% |
 | Rotating devices, shared address only | 0% (known blind spot; address alone is deliberately too weak to hold anyone) | 100% |
-| **Average** | **82%** | 100% |
+| **Average of the first four rows (excludes the labelled blind spot)** | **82%** | 100% |
 
 | Innocent look-alike | Groups with a wrongly held order (ours) | Naive baseline |
 |---|---|---|
@@ -127,9 +127,7 @@ Without any keys, detection and the offline analyst still run. Set `ADMIN_TOKEN`
 Python, FastAPI, SQLAlchemy (SQLite locally, Postgres on Render), networkx, PayPal REST APIs, Groq (`openai/gpt-oss-120b`), AG Grid Community (dashboard tables), Render (hosting). Tests: pytest.
 
 ## Prior work disclosure
-See [HACKATHON_CHANGES.md](HACKATHON_CHANGES.md) for exactly what existed before the hackathon and what was built during it.
-
-`app/detection_core.py` (the graph scoring engine) comes from the author's earlier project, **Abuse-Ring Sentinel**, and is reused as is. Everything else was written for this hackathon: the PayPal integration, authorize-screen-capture checkout, webhooks, dispute handling, the device-spread rule, the AI investigator and its guardrails, the approval, refund, void and hold flows, the held-buyer block, the admin lock, the dashboard, the self-test and the tests.
+This is a new project, built during the submission period (first commit Oct 28, 2026). That includes `app/detection_core.py` (the graph scoring engine) and everything else: the PayPal integration, authorize-screen-capture checkout, webhooks, dispute handling, the device-spread rule, the AI investigator and its guardrails, the approval, refund, void and hold flows, the held-buyer block, the admin lock, the dashboard, the self-test and the tests. AI coding assistance (Claude) was used throughout; the author ran and tested all of the code. See [HACKATHON_CHANGES.md](HACKATHON_CHANGES.md) for the build history.
 
 ## Security and payment-integrity notes
 - **The server sets the price.** The browser cannot change the amount (`PRODUCT_PRICE`, default 25.00).

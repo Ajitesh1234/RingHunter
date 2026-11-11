@@ -1,9 +1,9 @@
 # What existed before the hackathon, and what was built during it
 
 ## Existing before
-- **`app/detection_core.py`**: the graph scoring engine from the author's earlier project, *Abuse-Ring Sentinel* (built for a different event). It links accounts through shared attributes and scores clusters. It is reused as is, and only this file predates the hackathon.
+Nothing. This is a new project, and every file in the repo was written during the submission period (first commit Oct 28, 2026), including `app/detection_core.py`. AI coding assistance (Claude) was used throughout, and the author ran and tested all of the code.
 
-## Built during the hackathon (everything else)
+## Built during the hackathon
 - **PayPal integration:** Orders v2 (create, get, authorize, capture), Payments v2 (capture authorization, void, refund) with idempotency keys, signature-verified webhooks, Disputes (get, provide evidence, send message).
 - **Authorize-screen-capture checkout** with a server-set price, checkout binding and replay protection, held-buyer blocking before capture, and atomic order transitions.
 - **Screening rules:** core versus peripheral evidence, sticky identifiers, and the device-spread rule (added after the self-test exposed a slow-ring evasion).
